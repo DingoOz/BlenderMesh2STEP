@@ -151,6 +151,33 @@ def main():
     except OSError:
         pass
 
+    # Blind pocket: cutter open at the top (z=2), bottom at z=0 (inside the box).
+    # BLIND mode must keep the floor depth exact while still opening at the top.
+    blind = [
+        {"kind": "BOX", "op": "ADD", "name": "base", "params": {
+            "center": (0, 0, 0), "ax": (1, 0, 0), "ay": (0, 1, 0), "az": (0, 0, 1),
+            "hx": 2.0, "hy": 2.0, "hz": 2.0}},
+        {"kind": "CYLINDER", "op": "SUBTRACT", "cut": "BLIND", "name": "pocket",
+         "params": {"base": (0, 0, 1.0), "axis": (0, 0, 1), "radius": 1.0,
+                    "height": 2.0}},   # spans z=0..2; top (z=2) coplanar, floor at z=0
+    ]
+    out5 = os.path.join(os.path.dirname(__file__), "occ_blind.step")
+    occ_export.export(blind, out5, unit="MM", merge=False, overshoot=0.05)
+    r5 = STEPControl_Reader(); r5.ReadFile(out5); r5.TransferRoots(); sh5 = r5.OneShape()
+    pr5 = GProp_GProps(); BRepGProp.VolumeProperties_s(sh5, pr5); v5 = pr5.Mass()
+    # Pocket removes a depth-2 bore: 64 - π·1²·2 = 64 - 2π = 57.72. If the floor had
+    # been overshot through the bottom it would be 64 - 4π = 51.43.
+    expected_blind = 64.0 - math.pi * 1.0 ** 2 * 2.0
+    valid5 = BRepCheck_Analyzer(sh5).IsValid()
+    print(f"[info] blind pocket: volume={v5:.3f} expected={expected_blind:.3f} valid={valid5}")
+    if not valid5 or abs(v5 - expected_blind) > 0.5:
+        fail(f"blind pocket depth wrong (vol={v5:.3f}, expected {expected_blind:.3f})")
+    print("[ok] BLIND pocket: floor depth preserved, top opens cleanly")
+    try:
+        os.remove(out5)
+    except OSError:
+        pass
+
     for f in (out, out2):
         try:
             os.remove(f)

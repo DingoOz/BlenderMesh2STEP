@@ -16,7 +16,8 @@ import numpy as np
 from mathutils import Matrix, Vector
 
 
-def build_object(context, result, segments: int = 48, operation: str = "ADD"):
+def build_object(context, result, segments: int = 48, operation: str = "ADD",
+                 cut_mode: str = "THROUGH"):
     """Create and link a new mesh object representing ``result``.
 
     Returns the created object. Exact fit parameters are stashed under the
@@ -51,6 +52,7 @@ def build_object(context, result, segments: int = 48, operation: str = "ADD"):
     # Record the placement so STEP export can follow later manual moves.
     params["_xform"] = [matrix[i][j] for i in range(4) for j in range(4)]
     params["op"] = operation
+    params["cut"] = cut_mode
     obj["reverse"] = params
     # Tint cutters red in the viewport (Object colour shading) as a hint.
     obj.color = (0.85, 0.25, 0.25, 1.0) if operation == "SUBTRACT" else (0.8, 0.8, 0.8, 1.0)

@@ -101,9 +101,11 @@ class REVERSE_OT_fit_selection(Operator):
     def _record(self, context, settings, result, obj, build_objects):
         """Build the clean object (optional) and append a feature entry."""
         op = settings.default_operation
+        cut = settings.default_cut_mode
         obj_name = ""
         if build_objects:
-            new_obj = build.build_object(context, result, settings.segments, operation=op)
+            new_obj = build.build_object(context, result, settings.segments,
+                                         operation=op, cut_mode=cut)
             obj_name = new_obj.name
         item = settings.features.add()
         item.kind = result.kind
@@ -112,6 +114,7 @@ class REVERSE_OT_fit_selection(Operator):
         item.max_error = result.max_error
         item.object_name = obj_name
         item.operation = op
+        item.cut_mode = cut
         settings.active_feature = len(settings.features) - 1
 
     def execute(self, context):
@@ -220,6 +223,34 @@ class REVERSE_OT_set_operation(Operator):
         return {"FINISHED"}
 
 
+class REVERSE_OT_set_cut_mode(Operator):
+    """Set the cut mode (Through / Blind) of the active subtractive feature"""
+
+    bl_idname = "reverse.set_cut_mode"
+    bl_label = "Set Cut Mode"
+    bl_options = {"REGISTER", "UNDO"}
+
+    cut_mode: EnumProperty(
+        items=[("THROUGH", "Through", "Cut through both ends"),
+               ("BLIND", "Blind", "Keep pocket depth; open only one end")],
+        default="THROUGH",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        s = context.scene.reverse
+        return 0 <= s.active_feature < len(s.features)
+
+    def execute(self, context):
+        s = context.scene.reverse
+        item = s.features[s.active_feature]
+        item.cut_mode = self.cut_mode
+        obj = bpy.data.objects.get(item.object_name) if item.object_name else None
+        if obj is not None and "reverse" in obj:
+            obj["reverse"]["cut"] = self.cut_mode
+        return {"FINISHED"}
+
+
 class REVERSE_OT_select_feature_object(Operator):
     """Select the clean object created for the active feature"""
 
@@ -310,7 +341,9 @@ def _feature_from_object(obj, user_scale):
     rgb = tuple(obj.color[:3])
     color = rgb if any(abs(c - 1.0) > 1e-4 for c in rgb) else None
     op = data["op"] if "op" in data.keys() else "ADD"
-    return {"kind": kind, "name": obj.name, "params": params, "color": color, "op": op}
+    cut = data["cut"] if "cut" in data.keys() else "THROUGH"
+    return {"kind": kind, "name": obj.name, "params": params, "color": color,
+            "op": op, "cut": cut}
 
 
 class REVERSE_OT_export_step(Operator, ExportHelper):
@@ -472,6 +505,7 @@ classes = (
     REVERSE_OT_fit_selection,
     REVERSE_OT_clear_features,
     REVERSE_OT_set_operation,
+    REVERSE_OT_set_cut_mode,
     REVERSE_OT_select_feature_object,
     REVERSE_OT_export_step,
     REVERSE_OT_install_occt,

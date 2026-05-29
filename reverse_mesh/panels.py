@@ -38,6 +38,8 @@ class REVERSE_PT_main(Panel):
         col = layout.column(align=True)
         col.prop(settings, "primitive_type")
         col.prop(settings, "default_operation", text="Role")
+        if settings.default_operation == "SUBTRACT":
+            col.prop(settings, "default_cut_mode", text="Cut")
 
         obj = context.active_object
         in_edit = obj and obj.type == "MESH" and obj.mode == "EDIT"
@@ -86,6 +88,14 @@ class REVERSE_PT_features(Panel):
         row.operator("reverse.set_operation", text="Add", icon="ADD").operation = "ADD"
         row.operator("reverse.set_operation", text="Subtract", icon="REMOVE").operation = "SUBTRACT"
 
+        # Cut mode only matters for subtractive features.
+        active_sub = (0 <= settings.active_feature < len(settings.features)
+                      and settings.features[settings.active_feature].operation == "SUBTRACT")
+        if active_sub:
+            row = layout.row(align=True)
+            row.operator("reverse.set_cut_mode", text="Through").cut_mode = "THROUGH"
+            row.operator("reverse.set_cut_mode", text="Blind").cut_mode = "BLIND"
+
         row = layout.row(align=True)
         row.operator("reverse.select_feature_object", icon="RESTRICT_SELECT_OFF", text="Select")
         row.operator("reverse.clear_features", icon="TRASH", text="Clear")
@@ -96,6 +106,10 @@ class REVERSE_PT_features(Panel):
             box.label(text=item.summary, icon="DOT")
             box.label(text=f"RMS: {item.rms:.5g}")
             box.label(text=f"Max error: {item.max_error:.5g}")
+            role = "Subtract" if item.operation == "SUBTRACT" else "Add"
+            role_txt = f"{role} · {item.cut_mode.title()}" if item.operation == "SUBTRACT" else role
+            box.label(text=f"Role: {role_txt}",
+                      icon="REMOVE" if item.operation == "SUBTRACT" else "ADD")
 
         box = layout.box()
         box.label(text="Export", icon="EXPORT")

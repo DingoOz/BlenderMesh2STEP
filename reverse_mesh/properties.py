@@ -34,6 +34,7 @@ class ReverseFeature(PropertyGroup):
     max_error: FloatProperty(name="Max error")
     object_name: StringProperty(name="Object")
     operation: StringProperty(name="Operation", default="ADD")
+    cut_mode: StringProperty(name="Cut mode", default="THROUGH")
 
 
 class ReverseSettings(PropertyGroup):
@@ -56,6 +57,15 @@ class ReverseSettings(PropertyGroup):
             ("SUBTRACT", "Subtract", "A cutter to be subtracted (e.g. a hole)", "REMOVE", 1),
         ],
         default="ADD",
+    )
+    default_cut_mode: EnumProperty(
+        name="Cut",
+        description="For subtractive cutters: through-hole, or blind pocket (keeps depth)",
+        items=[
+            ("THROUGH", "Through", "Overshoot both ends so the hole opens on coplanar faces"),
+            ("BLIND", "Blind", "Overshoot only the open end; keep the pocket depth exact"),
+        ],
+        default="THROUGH",
     )
     segment_regions: BoolProperty(
         name="Segment regions",

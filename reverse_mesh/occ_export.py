@@ -51,32 +51,59 @@ def _imp(module, *names):
     raise ImportError(f"Cannot import {names} from {module}: {last}")
 
 
-def _grow_cutter(kind, p, frac):
-    """Extend a subtractive cutter along its axis so its ends overshoot the body.
+def _grow_cutter(kind, p, frac, ends="BOTH"):
+    """Extend a subtractive cutter along its axis so its end(s) overshoot the body.
 
     When a cutter's end cap is coplanar with a face of the base solid, the boolean
-    has coincident faces and may not open the hole cleanly. Lengthening the cutter
-    by ``frac`` of its own extent at each end removes only "air" beyond the body,
-    guaranteeing a clean through-cut. ``frac`` is a fraction (0.05 = 5% each end).
+    has coincident faces and may not open the hole cleanly. Extending past the
+    surface removes only "air" beyond the body, guaranteeing a clean cut. ``ends``
+    selects which axial extreme to grow: ``"BOTH"`` (through-hole), ``"LOW"`` /
+    ``"HIGH"`` (one open end of a blind pocket), or ``"NONE"``. ``frac`` is the
+    fraction of the cutter's own length added at each grown end.
+
+    For cylinders, ``"LOW"`` is the −axis end and ``"HIGH"`` the +axis end. For
+    cones, ``"LOW"`` is the r1 (base) end and ``"HIGH"`` the r2 end.
     """
-    if frac <= 0:
+    if frac <= 0 or ends == "NONE":
         return p
+    grow_low = ends in ("BOTH", "LOW")
+    grow_high = ends in ("BOTH", "HIGH")
     q = dict(p)
+    axis = _unit(tuple(float(c) for c in p["axis"]))
+
     if kind == "CYLINDER":
-        # 'base' is the axial midpoint, so growing the height extends both ends.
-        q["height"] = p["height"] * (1.0 + 2.0 * frac)
+        h = p["height"]
+        g = frac * h
+        mid = tuple(float(c) for c in p["base"])      # axial midpoint
+        add = (g if grow_low else 0.0) + (g if grow_high else 0.0)
+        # Shift the midpoint by half the *net* growth so only the chosen ends move.
+        shift = (g if grow_high else 0.0) - (g if grow_low else 0.0)
+        q["height"] = h + add
+        q["base"] = _add(mid, _scale(axis, shift / 2.0))
     elif kind == "CONE":
         h = p["height"]
         g = frac * h
         slope = (p["radius2"] - p["radius1"]) / h if h else 0.0
-        axis = tuple(float(c) for c in p["axis"])
-        base = tuple(float(c) for c in p["base"])
-        q["base"] = _sub(base, _scale(axis, g))      # push the r1 end outward
-        q["height"] = h + 2.0 * g
-        q["radius1"] = max(0.0, p["radius1"] - slope * g)
-        q["radius2"] = max(0.0, p["radius2"] + slope * g)
+        base = tuple(float(c) for c in p["base"])      # r1 (low) end
+        q["base"] = _sub(base, _scale(axis, g)) if grow_low else base
+        q["height"] = h + (g if grow_low else 0.0) + (g if grow_high else 0.0)
+        q["radius1"] = max(0.0, p["radius1"] - slope * g) if grow_low else p["radius1"]
+        q["radius2"] = max(0.0, p["radius2"] + slope * g) if grow_high else p["radius2"]
     # Boxes / spheres / tori have no single pair of "ends"; left unchanged.
     return q
+
+
+def _cutter_end_centers(kind, p):
+    """World-space centres of a cutter's two end caps, as (low, high) or None."""
+    axis = _unit(tuple(float(c) for c in p["axis"]))
+    if kind == "CYLINDER":
+        mid = tuple(float(c) for c in p["base"])
+        half = _scale(axis, p["height"] / 2.0)
+        return _sub(mid, half), _add(mid, half)
+    if kind == "CONE":
+        base = tuple(float(c) for c in p["base"])
+        return base, _add(base, _scale(axis, p["height"]))
+    return None
 
 
 def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05):
@@ -99,6 +126,38 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05):
     (Cut,) = _imp("BRepAlgoAPI", "BRepAlgoAPI_Cut")
     (TopoDS_Compound,) = _imp("TopoDS", "TopoDS_Compound")
     (BRep_Builder,) = _imp("BRep", "BRep_Builder")
+
+    def build(kind, p):
+        try:
+            return _make_shape(kind, p, gp_Pnt, gp_Dir, gp_Ax3, gp_Pln,
+                               MakeBox, MakeCyl, MakeCone, MakeSphere, MakeTorus,
+                               MakeFace, ax2)
+        except Exception:
+            return None, False
+
+    def blind_open_end(base_solid, kind, p):
+        """Which end of a blind cutter is open (outside the base): LOW/HIGH/BOTH."""
+        centers = _cutter_end_centers(kind, p)
+        if base_solid is None or centers is None:
+            return "BOTH"
+        try:
+            (Classifier,) = _imp("BRepClass3d", "BRepClass3d_SolidClassifier")
+            (TopAbs_IN,) = _imp("TopAbs", "TopAbs_IN")
+
+            def inside(pt):
+                clf = Classifier(base_solid, gp_Pnt(*[float(c) for c in pt]), 1e-7)
+                return clf.State() == TopAbs_IN
+
+            low_in, high_in = inside(centers[0]), inside(centers[1])
+        except Exception:
+            return "BOTH"
+        if low_in and not high_in:
+            return "HIGH"
+        if high_in and not low_in:
+            return "LOW"
+        if not low_in and not high_in:
+            return "BOTH"      # through-like
+        return "NONE"          # fully buried cavity
     (STEPControl_Writer,) = _imp("STEPControl", "STEPControl_Writer")
     (Interface_Static,) = _imp("Interface", "Interface_Static")
     (IFSelect_RetDone,) = _imp("IFSelect", "IFSelect_RetDone")
@@ -108,49 +167,54 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05):
                       gp_Dir(*[float(c) for c in zdir]),
                       gp_Dir(*[float(c) for c in xdir]))
 
-    adds, subs, faces = [], [], []
+    # Separate the features by role; cutters are built later (they may need the
+    # finished base solid to decide which end of a blind hole is open).
+    adds, faces, cutters = [], [], []
     for feat in features:
         kind = feat["kind"]
-        p = feat["params"]
         op = feat.get("op", "ADD")
         if op == "SUBTRACT":
-            p = _grow_cutter(kind, p, overshoot)   # overshoot so ends cut clean
-        try:
-            shape, is_solid = _make_shape(
-                kind, p, gp_Pnt, gp_Dir, gp_Ax3, gp_Pln,
-                MakeBox, MakeCyl, MakeCone, MakeSphere, MakeTorus, MakeFace, ax2)
-        except Exception:  # skip a bad feature rather than abort the file
-            shape = None
-            is_solid = False
+            cutters.append(feat)
+            continue
+        shape, is_solid = build(kind, feat["params"])
         if shape is None:
             continue
-        if not is_solid:
-            faces.append(shape)            # planes can only add
-        elif op == "SUBTRACT":
-            subs.append(shape)
-        else:
-            adds.append(shape)
+        (adds if is_solid else faces).append(shape)
 
-    if not adds and not subs and not faces:
+    if not adds and not cutters and not faces:
         raise ValueError("No exportable shapes")
 
-    # Boolean assembly whenever something is marked SUBTRACT, or merge is on.
-    do_bool = merge or bool(subs)
+    do_bool = merge or bool(cutters)
     parts = list(faces)
     note = ""
     if do_bool and adds:
         base = adds[0]
         for s in adds[1:]:
             base = Fuse(base, s).Shape()
-        for s in subs:
-            base = Cut(base, s).Shape()    # carve each cutter out of the body
+        n_cut = 0
+        for feat in cutters:
+            kind, p = feat["kind"], feat["params"]
+            if feat.get("cut", "THROUGH") == "BLIND":
+                ends = blind_open_end(base, kind, p)   # overshoot only the open end
+            else:
+                ends = "BOTH"                          # through-hole
+            cutter, ok = build(kind, _grow_cutter(kind, p, overshoot, ends))
+            if cutter is None:
+                continue
+            base = Cut(base, cutter).Shape()
+            n_cut += 1
         parts.append(base)
-        note = f"1 body (+{len(adds)} / -{len(subs)})"
+        note = f"1 body (+{len(adds)} / -{n_cut})"
     else:
-        if subs and not adds:
-            note = f"{len(subs)} cutter(s) with no base to subtract from"
-        parts.extend(adds + subs)
-        note = note or f"{len(adds) + len(subs)} solid(s)"
+        # No base to cut from: export everything separately (overshoot is moot).
+        for feat in cutters:
+            shape, ok = build(feat["kind"], feat["params"])
+            if shape is not None:
+                parts.append(shape)
+        parts.extend(adds)
+        if cutters and not adds:
+            note = f"{len(cutters)} cutter(s) with no base to subtract from"
+        note = note or f"{len(adds) + len(cutters)} solid(s)"
 
     # Combine into one compound to transfer in a single shape.
     builder = BRep_Builder()

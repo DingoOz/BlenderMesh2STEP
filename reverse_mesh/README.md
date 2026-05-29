@@ -66,11 +66,18 @@ the Subtract solids out, producing **one watertight solid with real holes**
 Subtract requires OCCT (booleans need a kernel); the pure-Python writer ignores
 roles and exports every primitive separately.
 
-**Cutter overshoot.** When a cutter's end cap is exactly coplanar with a face of
-the base body, the boolean has coincident faces and may not open the hole. The
-exporter automatically extends subtractive cylinders/cones slightly past each end
-(the **Cutter overshoot** option, 5% by default) so the bore cuts cleanly through
-and the hole opens on the coplanar surface. Set it to 0 for an exact blind pocket.
+**Through vs. Blind.** Each subtractive cutter has a **Cut mode**:
+
+- **Through** — overshoots *both* ends so the hole opens cleanly on coplanar faces
+  (avoids the coincident-face boolean failure when a cutter's cap is flush with a
+  base face).
+- **Blind** — overshoots *only the open end* and keeps the pocket depth exact. The
+  open end is detected automatically by testing which end of the cutter lies inside
+  the base solid, so you don't have to worry about the cutter's axis direction.
+
+Verified by volume: a box drilled *through* by an r=1 cylinder → 64 − 4π = 51.43;
+the same as a depth-2 *blind* pocket → 64 − 2π = 57.72 (floor preserved). The
+**Cutter overshoot** amount (5% default) is configurable; set it to 0 to disable.
 
 ### Optional OCCT kernel backend
 
