@@ -1,47 +1,107 @@
 # BlenderMesh2STEP
 
-Reverse-engineer Blender meshes into clean, analytic **CAD primitives** and export
-them as **STEP AP242** — a Blender 4.2+ extension.
+**Turn dumb triangle meshes back into real CAD.** A Blender 4.2+ extension that
+fits exact analytic surfaces to your mesh and exports genuine **STEP AP242**
+solids — the kind FreeCAD, Fusion, SolidWorks and Onshape open as editable,
+measurable, manufacturable geometry.
 
-It fits exact analytic surfaces (plane, box, cylinder, cone, sphere, torus) to
-selected regions of a mesh, in the semi-automatic, human-in-the-loop style of the
-[Reverse](https://github.com/nico-schluter/Reverse) Fusion 360 add-in, then writes
-real analytic B-rep solids to STEP that open as true solids in FreeCAD and other
-CAD tools.
+[![Release](https://img.shields.io/github/v/release/DingoOz/BlenderMesh2STEP)](https://github.com/DingoOz/BlenderMesh2STEP/releases)
+[![Blender](https://img.shields.io/badge/Blender-4.2%2B-orange)](https://www.blender.org/)
+[![License](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
 
-> A mesh has thrown away the intent we want back — a 64-sided prism and a cylinder
-> are identical triangles. Rather than guess, you tell the tool "these faces are a
-> cylinder" and it recovers the exact analytic surface by least squares, typically
-> to machine precision on clean, Blender-authored meshes.
+---
 
-## Features
+## The problem it solves
 
-- **Fits 6 analytic primitives**: plane, oriented box, cylinder, cone, sphere, torus.
-- **Auto-detect** with normal-based disambiguation and an Occam tie-break.
-- **Region segmentation** by crease angle (a cube → 6 planes; a cylinder → side + 2 caps).
-- **Oriented box** reconstruction from planar faces (recovers rotation).
-- **STEP AP242 export**, pure Python, zero dependencies — genuine analytic surfaces
-  as valid `MANIFOLD_SOLID_BREP` solids, assembled with units and per-feature colour.
-- **Optional OCCT kernel backend** (install-on-demand): merge solids into one
-  watertight body and **boolean Add/Subtract** to reconstruct drilled/pocketed parts.
+You modelled a part in Blender. Now a machine shop, a CAD engineer, or a slicer
+wants a **real solid** — a STEP file with actual cylinders and planes, not a
+soup of triangles. Exporting your mesh as STL or a tessellated STEP gives them a
+faceted blob they can't measure, fillet, or edit.
+
+A mesh has thrown away the *intent* you want back: a 20 mm cylinder and a
+64-sided prism are **identical triangles**. There's no button that can reliably
+guess what a mesh "meant to be."
+
+**BlenderMesh2STEP doesn't guess — you point, it reconstructs.** You tell it
+"these faces are a cylinder," and it recovers the exact analytic surface by
+least-squares fitting, typically **to machine precision** on clean,
+Blender-authored meshes. The result is a true B-rep solid, not an approximation.
+
+```
+   Blender mesh                BlenderMesh2STEP              STEP AP242 solid
+  (triangles, no intent)   ──►  fit + reconstruct   ──►   (real cylinders, planes,
+   64-gon "cylinder"             you confirm intent          holes, dimensions)
+```
+
+## What you can actually do with it
+
+- **Convert a printed/modelled part to editable CAD.** Select a face → get a
+  clean plane. Select a curved wall → get an exact cylinder with a real radius.
+  Export STEP and open it in FreeCAD as a true solid you can dimension and modify.
+- **Reconstruct boxes and cuboids** — even rotated ones — from their flat faces,
+  instead of an averaged mess. One click turns a cube into a proper box solid.
+- **Drill holes and cut pockets with booleans.** Tag a fitted cylinder as
+  *Subtract* and the exporter carves it out of the base body — reconstructing a
+  drilled, pocketed part as a single watertight solid with real holes.
+- **Split a whole object into its surfaces automatically.** Segmentation turns a
+  cube into 6 planes, or a cylinder into its side + 2 caps, and fits each.
+- **Measure and verify.** Every fit reports its RMS error so you know how well it
+  matches; exported solids are kernel-valid with correct volumes.
+
+## Fits the full analytic surface set
+
+| Primitive | What it recovers | How |
+|-----------|------------------|-----|
+| **Plane** | flat faces, with extent | SVD — normal = least-spread direction |
+| **Box** | oriented cuboids (rotation recovered) | clusters face normals into 3 axes |
+| **Cylinder** | axis, radius, height | axis from normals + Kåsa circle fit |
+| **Cone** | apex, half-angle, radii (incl. frustums) | linear apex condition `(p−apex)·n = 0` |
+| **Sphere** | centre, radius | algebraic least squares |
+| **Torus** | axis, major + minor radius | PCA seed + angular refinement |
+| **Auto** | picks the best fit | normal agreement + Occam tie-break |
+
+On clean meshes these fits land at **~1e-8** RMS — effectively exact.
+
+## 60-second workflow
+
+1. Select your mesh, enter **Edit Mode**, open the **Reverse** tab in the sidebar (`N`).
+2. Choose a primitive (or **Auto-detect**) and a **Role** (*Add* / *Subtract*).
+3. Select the faces of one feature → **Fit Primitive to Selection**. Repeat per feature.
+4. **Export STEP (AP242)** → open it in your CAD tool as a real solid.
+
+That's the semi-automatic, human-in-the-loop model proven by the
+[Reverse](https://github.com/nico-schluter/Reverse) Fusion 360 add-in — robust,
+because *you* supply the one thing a mesh can't: intent.
+
+## Two ways to export — both real STEP
+
+**Pure Python (built in, zero dependencies).** Writes genuine analytic surfaces
+(`CYLINDRICAL_SURFACE`, `TOROIDAL_SURFACE`, …) as valid `MANIFOLD_SOLID_BREP`
+solids in a real **AP242** file, assembled with units and per-feature colour. No
+kernel, no install — works the moment you enable the add-on.
+
+**OCCT kernel (optional, one-click install).** For **merging solids into one
+watertight body** and **boolean Add/Subtract** (drilling holes, cutting pockets).
+If OpenCASCADE isn't present, the panel offers an **Install OCCT** button that
+fetches it into the add-on's own folder — no admin rights, survives Blender
+updates. Without it, everything else still works.
+
+## Proven correct, not just plausible
+
+Hand-authored B-rep topology usually *looks* right and silently fails in real CAD.
+This one is validated against the OpenCASCADE kernel: every exported solid imports
+as **topologically valid with the correct volume**, e.g.
+
+- cylinder r2 × h6 → **75.40**, sphere r2.5 → **65.45**, torus → **222.07**
+- box 4×4×4 drilled by an r1 cylinder → **64 − 4π = 51.43** ✅
 
 ## Install
 
-1. Download `reverse_mesh-*.zip` from the [Releases](../../releases) page (or build it,
-   see below).
-2. In Blender 4.2+: **Edit ▸ Preferences ▸ Add-ons ▸ Install from Disk** → pick the zip,
-   then enable **Reverse — Mesh to Parametric**.
+1. Download `reverse_mesh-*.zip` from the [**Releases**](../../releases) page.
+2. Blender 4.2+: **Edit ▸ Preferences ▸ Add-ons ▸ Install from Disk** → pick the zip
+   → enable **Reverse — Mesh to Parametric**.
 
-## Usage
-
-1. Select a mesh and enter **Edit Mode**; open the **Reverse** tab in the sidebar (`N`).
-2. Pick a primitive (or *Auto-detect*) and a **Role** (Add / Subtract).
-3. Select the faces of one feature and click **Fit Primitive to Selection**. Repeat per feature.
-4. **Export STEP (AP242)** — choose the *OCCT* backend for merged/boolean solids.
-
-Full documentation: [`reverse_mesh/README.md`](reverse_mesh/README.md).
-
-## Build from source
+Or build it yourself:
 
 ```bash
 blender --command extension build --source-dir reverse_mesh --output-dir dist
@@ -50,17 +110,28 @@ blender --command extension build --source-dir reverse_mesh --output-dir dist
 ## Tests
 
 ```bash
-python3 reverse_mesh/tests/test_fitting.py            # fitting core (no Blender)
-python3 reverse_mesh/tests/test_step.py               # STEP writer (no Blender)
+python3 reverse_mesh/tests/test_fitting.py     # fitting core (no Blender)
+python3 reverse_mesh/tests/test_step.py        # STEP writer (no Blender)
 blender --background --python reverse_mesh/tests/blender_smoke.py   # integration
 ```
 
-## How it works / design
+## Honest about the edges
 
-See [`mesh-to-parametric-plan.md`](mesh-to-parametric-plan.md) for the background and
-the tiered design (geometry recovery vs. intent recovery), and
-[`reverse_mesh/README.md`](reverse_mesh/README.md) for the per-primitive fitting methods.
+This is **Tier 1** reverse engineering — geometry recovery, not full feature-tree
+/ intent recovery (that's an unsolved ML research problem). It shines on clean,
+prismatic, mechanical parts and is semi-automatic by design: the human picks
+features so the tool never has to guess wrong. Organic/freeform shapes are out of
+scope. See [`mesh-to-parametric-plan.md`](mesh-to-parametric-plan.md) for the full
+design rationale and the tiered roadmap, and
+[`reverse_mesh/README.md`](reverse_mesh/README.md) for per-primitive details.
+
+## Roadmap
+
+- In-place region replacement (stitch the clean primitive back into the mesh)
+- Partial-cylinder / partial-torus fitting (select just the visible wall of a hole)
+- OCCT intersect/section ops and per-feature colour via XCAF
+- Sketch + extrude/revolve recovery (Tier 2 — genuinely parametric output)
 
 ## License
 
-GPL-3.0-or-later.
+[GPL-3.0-or-later](LICENSE). Inspired by [nico-schluter/Reverse](https://github.com/nico-schluter/Reverse).
