@@ -5,6 +5,7 @@ fits exact analytic surfaces to your mesh and exports genuine **STEP AP242**
 solids — the kind FreeCAD, Fusion, SolidWorks and Onshape open as editable,
 measurable, manufacturable geometry.
 
+[![tests](https://github.com/DingoOz/BlenderMesh2STEP/actions/workflows/tests.yml/badge.svg)](https://github.com/DingoOz/BlenderMesh2STEP/actions/workflows/tests.yml)
 [![Release](https://img.shields.io/github/v/release/DingoOz/BlenderMesh2STEP)](https://github.com/DingoOz/BlenderMesh2STEP/releases)
 [![Blender](https://img.shields.io/badge/Blender-4.2%2B-orange)](https://www.blender.org/)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
