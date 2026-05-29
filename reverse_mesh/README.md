@@ -79,6 +79,15 @@ Verified by volume: a box drilled *through* by an r=1 cylinder → 64 − 4π = 
 the same as a depth-2 *blind* pocket → 64 − 2π = 57.72 (floor preserved). The
 **Cutter overshoot** amount (5% default) is configurable; set it to 0 to disable.
 
+### Make watertight (sew + heal)
+
+The **Make watertight** export option (OCCT) sews all faces together, builds closed
+solids and heals gaps within the **Sew tolerance**. It lets you fit the 6 planes of
+a box (e.g. via segmentation) and export a single watertight box solid — the planes
+are stitched into one closed shell. Crucially, it **reports the result honestly**:
+if faces don't meet within tolerance it tells you how many free edges remain rather
+than shipping a leaky file. (Verified: 6 loose planes → 1 closed solid, volume 8.0.)
+
 ### Optional OCCT kernel backend
 
 For **booleans and merging fitted solids into one watertight body** (and a

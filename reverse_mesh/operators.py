@@ -379,6 +379,19 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
         ),
         default=0.05, min=0.0, max=1.0, subtype="FACTOR",
     )
+    make_watertight: BoolProperty(
+        name="Make watertight",
+        description=(
+            "Sew all faces together, build a closed solid and heal small gaps "
+            "(OCCT only). Reports if the result still has open boundaries"
+        ),
+        default=False,
+    )
+    sew_tolerance: FloatProperty(
+        name="Sew tolerance",
+        description="Max gap between faces that the watertight pass will stitch closed",
+        default=0.01, min=0.0, max=100.0, precision=4,
+    )
     unit: EnumProperty(
         name="Unit",
         description="Length unit declared in the STEP file",
@@ -425,7 +438,9 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
             try:
                 info = occ_export.export(features, self.filepath, unit=self.unit,
                                          merge=self.merge_solids,
-                                         overshoot=self.cutter_overshoot)
+                                         overshoot=self.cutter_overshoot,
+                                         watertight=self.make_watertight,
+                                         sew_tol=self.sew_tolerance)
                 self.report({"INFO"}, f"Exported via OCCT: {info}")
                 return {"FINISHED"}
             except Exception as exc:

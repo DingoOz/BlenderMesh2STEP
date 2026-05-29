@@ -178,6 +178,39 @@ def main():
     except OSError:
         pass
 
+    # Watertight: 6 loose planes that tile a 2x2x2 box must sew into one closed solid.
+    def plane(c, n, e1, e2):
+        return {"kind": "PLANE", "op": "ADD", "name": "f", "params": {
+            "point": c, "normal": n, "e1": e1, "e2": e2, "half_u": 1.0, "half_v": 1.0}}
+    box_planes = [
+        plane((1, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)),
+        plane((-1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, 0, 1)),
+        plane((0, 1, 0), (0, 1, 0), (1, 0, 0), (0, 0, 1)),
+        plane((0, -1, 0), (0, -1, 0), (1, 0, 0), (0, 0, 1)),
+        plane((0, 0, 1), (0, 0, 1), (1, 0, 0), (0, 1, 0)),
+        plane((0, 0, -1), (0, 0, -1), (1, 0, 0), (0, 1, 0)),
+    ]
+    out6 = os.path.join(os.path.dirname(__file__), "occ_watertight.step")
+    info = occ_export.export(box_planes, out6, unit="MM", watertight=True, sew_tol=1e-6)
+    print("[info] watertight export:", info)
+    if "free edge" in info or "watertight" not in info:
+        fail(f"planes were not made watertight: {info}")
+    r6 = STEPControl_Reader(); r6.ReadFile(out6); r6.TransferRoots(); sh6 = r6.OneShape()
+    n6 = 0
+    e6 = TopExp_Explorer(sh6, TopAbs_SOLID)
+    while e6.More():
+        n6 += 1
+        e6.Next()
+    pr6 = GProp_GProps(); BRepGProp.VolumeProperties_s(sh6, pr6); v6 = pr6.Mass()
+    print(f"[info] sewn solid: solids={n6} volume={v6:.3f} (expected 8.0)")
+    if n6 != 1 or abs(v6 - 8.0) > 0.01:
+        fail(f"6 planes did not sew into one box solid (solids={n6}, vol={v6:.3f})")
+    print("[ok] watertight: 6 loose planes → 1 closed box solid (volume 8)")
+    try:
+        os.remove(out6)
+    except OSError:
+        pass
+
     for f in (out, out2):
         try:
             os.remove(f)

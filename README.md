@@ -82,7 +82,9 @@ solids in a real **AP242** file, assembled with units and per-feature colour. No
 kernel, no install — works the moment you enable the add-on.
 
 **OCCT kernel (optional, one-click install).** For **merging solids into one
-watertight body** and **boolean Add/Subtract** (drilling holes, cutting pockets).
+watertight body**, **boolean Add/Subtract** (drilling through & blind holes,
+cutting pockets), and a **Make watertight** sew-and-heal pass that stitches loose
+faces into a closed solid and tells you if any boundary is still open.
 If OpenCASCADE isn't present, the panel offers an **Install OCCT** button that
 fetches it into the add-on's own folder — no admin rights, survives Blender
 updates. Without it, everything else still works.

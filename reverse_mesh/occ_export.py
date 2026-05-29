@@ -106,7 +106,55 @@ def _cutter_end_centers(kind, p):
     return None
 
 
-def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05):
+def _make_watertight(shape, tol):
+    """Sew all faces of ``shape`` into shells, solidify and heal them.
+
+    Returns ``(result_shape, n_solids, n_free_edges)``. ``n_free_edges == 0`` means
+    every boundary was matched — the result is closed (watertight). Faces that
+    don't meet within ``tol`` leave free edges and are reported, not hidden.
+    """
+    (Sewing,) = _imp("BRepBuilderAPI", "BRepBuilderAPI_Sewing")
+    (MakeSolid,) = _imp("BRepBuilderAPI", "BRepBuilderAPI_MakeSolid")
+    (ShapeFix_Shape,) = _imp("ShapeFix", "ShapeFix_Shape")
+    (TopExp_Explorer,) = _imp("TopExp", "TopExp_Explorer")
+    (TopAbs_FACE, TopAbs_SHELL) = _imp("TopAbs", "TopAbs_FACE", "TopAbs_SHELL")
+    (TopoDS,) = _imp("TopoDS", "TopoDS")
+    (BRep_Builder,) = _imp("BRep", "BRep_Builder")
+    (TopoDS_Compound,) = _imp("TopoDS", "TopoDS_Compound")
+
+    sew = Sewing(tol)
+    exp = TopExp_Explorer(shape, TopAbs_FACE)
+    while exp.More():
+        sew.Add(exp.Current())
+        exp.Next()
+    sew.Perform()
+    sewn = sew.SewedShape()
+    free_edges = sew.NbFreeEdges()
+
+    builder = BRep_Builder()
+    comp = TopoDS_Compound()
+    builder.MakeCompound(comp)
+    n_solids = 0
+    found_shell = False
+    sh = TopExp_Explorer(sewn, TopAbs_SHELL)
+    while sh.More():
+        found_shell = True
+        try:
+            solid = MakeSolid(TopoDS.Shell_s(sh.Current())).Solid()
+            fix = ShapeFix_Shape(solid)
+            fix.Perform()
+            builder.Add(comp, fix.Shape())
+            n_solids += 1
+        except Exception:
+            builder.Add(comp, sh.Current())
+        sh.Next()
+    if not found_shell:
+        return sewn, 0, free_edges
+    return comp, n_solids, free_edges
+
+
+def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
+           watertight=False, sew_tol=0.01):
     """Build OCCT solids from ``features`` and write an AP242 STEP file.
 
     Returns a short status string. If ``merge`` is set, all solids are fused into
@@ -222,6 +270,17 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05):
     builder.MakeCompound(compound)
     for part in parts:
         builder.Add(compound, part)
+
+    if watertight:
+        try:
+            healed, n_solids, free_edges = _make_watertight(compound, sew_tol)
+            compound = healed
+            if free_edges == 0:
+                note += f" — watertight ({n_solids} closed solid(s))"
+            else:
+                note += f" — NOT watertight: {free_edges} free edge(s) remain"
+        except Exception as exc:
+            note += f" — watertight pass failed: {exc}"
 
     # The writer's constructor registers the STEP static parameters, so schema/
     # unit must be set *after* it is created. OCCT's AP242 value is "AP242DIS".
