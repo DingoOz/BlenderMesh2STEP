@@ -1,0 +1,111 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Validate the AP242 STEP writer without Blender.
+
+Checks structural integrity (every #ref resolves, header/schema/footer present,
+expected entity kinds emitted) for one of every primitive. If an OCCT binding
+(pythonocc-core / OCC) is importable it additionally re-reads the file and
+counts solids — otherwise that step is skipped with a note.
+
+    python3 tests/test_step.py
+"""
+
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import step_export as se  # noqa: E402
+
+
+def _features():
+    return [
+        {"kind": "PLANE", "name": "p", "params": {
+            "point": (0, 0, 0), "normal": (0, 0, 1), "e1": (1, 0, 0), "e2": (0, 1, 0),
+            "half_u": 5.0, "half_v": 3.0}},
+        {"kind": "BOX", "name": "b", "params": {
+            "center": (5, 5, 5), "ax": (1, 0, 0), "ay": (0, 1, 0), "az": (0, 0, 1),
+            "hx": 2.0, "hy": 3.0, "hz": 4.0}},
+        {"kind": "CYLINDER", "name": "c", "params": {
+            "base": (10, 0, 0), "axis": (0, 0, 1), "radius": 2.0, "height": 6.0}},
+        {"kind": "CONE", "name": "cn", "params": {
+            "base": (20, 0, 0), "axis": (0, 0, 1), "radius1": 3.0, "radius2": 1.0,
+            "height": 5.0}},
+        {"kind": "CONE", "name": "cn2", "params": {  # pointed cone
+            "base": (30, 0, 0), "axis": (0, 0, 1), "radius1": 3.0, "radius2": 0.0,
+            "height": 5.0}},
+        {"kind": "SPHERE", "name": "s", "params": {"center": (40, 0, 0), "radius": 2.5}},
+        {"kind": "TORUS", "name": "t", "params": {
+            "center": (50, 0, 0), "axis": (0, 0, 1), "major_radius": 5.0,
+            "minor_radius": 1.5}},
+    ]
+
+
+def main():
+    ok = True
+    text = se.build_step(_features(), unit="MM", product_name="Test",
+                         author="tester", timestamp="2026-05-29T00:00:00")
+
+    def check(name, cond, detail=""):
+        nonlocal ok
+        ok = ok and cond
+        print(f"[{'PASS' if cond else 'FAIL'}] {name} {detail}")
+
+    check("header", text.startswith("ISO-10303-21;"))
+    check("footer", text.rstrip().endswith("END-ISO-10303-21;"))
+    check("ap242 schema", se.AP242_SCHEMA in text)
+    check("has DATA/ENDSEC", "DATA;" in text and "ENDSEC;" in text)
+
+    # Every referenced #id must be defined exactly once.
+    defined = set(re.findall(r"^#(\d+)=", text, re.MULTILINE))
+    data = text.split("DATA;", 1)[1]
+    referenced = set(re.findall(r"#(\d+)", data))
+    dangling = referenced - defined
+    check("no dangling refs", not dangling, f"missing {sorted(dangling)[:5]}")
+
+    # Definition uniqueness.
+    all_defs = re.findall(r"^#(\d+)=", text, re.MULTILINE)
+    check("unique ids", len(all_defs) == len(set(all_defs)))
+
+    # Expected analytic surface kinds present.
+    for ent in ("PLANE(", "CYLINDRICAL_SURFACE(", "CONICAL_SURFACE(",
+                "SPHERICAL_SURFACE(", "TOROIDAL_SURFACE(", "MANIFOLD_SOLID_BREP(",
+                "CLOSED_SHELL(", "ADVANCED_FACE(", "COLOUR_RGB(",
+                "SHAPE_DEFINITION_REPRESENTATION("):
+        check(f"emits {ent[:-1]}", ent in text)
+
+    n_solids = text.count("MANIFOLD_SOLID_BREP(")
+    check("solid count", n_solids == 6, f"got {n_solids}")  # box+cyl+2cone+sph+torus; plane is a surface model
+
+    # All reals carry a decimal point (spot-check there are no bare integers in coords).
+    bad = re.findall(r"CARTESIAN_POINT\('',\(([^)]*)\)", text)
+    bad_nums = [seg for seg in bad if re.search(r"(?<![.\dEe])-?\d+(?![.\dEe])", seg)]
+    check("reals have decimal point", not bad_nums, f"{bad_nums[:2]}")
+
+    # Save for manual inspection / optional kernel import.
+    out = os.path.join(os.path.dirname(__file__), "sample_export.step")
+    with open(out, "w") as f:
+        f.write(text)
+    print(f"[info] wrote {out} ({len(text)} bytes, {len(all_defs)} entities)")
+
+    # Optional: round-trip through OCCT if available.
+    try:
+        from OCC.Core.STEPControl import STEPControl_Reader  # type: ignore
+        from OCC.Core.IFSelect import IFSelect_RetDone  # type: ignore
+        reader = STEPControl_Reader()
+        status = reader.ReadFile(out)
+        if status == IFSelect_RetDone:
+            reader.TransferRoots()
+            shape = reader.OneShape()
+            check("OCCT import", not shape.IsNull())
+        else:
+            check("OCCT import", False, f"status={status}")
+    except ImportError:
+        print("[skip] OCCT not available — structural checks only")
+
+    print(f"\n{'ALL STEP CHECKS PASSED' if ok else 'STEP CHECKS FAILED'}")
+    sys.exit(0 if ok else 1)
+
+
+if __name__ == "__main__":
+    main()

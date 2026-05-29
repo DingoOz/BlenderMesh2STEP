@@ -1,0 +1,176 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Standalone tests for the fitting core — no Blender required.
+
+Run from the extension root:
+    python3 -m tests.test_fitting
+or with pytest:
+    pytest reverse_mesh/tests
+"""
+
+import math
+import os
+import sys
+
+import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from fitting import (  # noqa: E402
+    Region,
+    fit_auto,
+    fit_box,
+    fit_cone,
+    fit_cylinder,
+    fit_plane,
+    fit_sphere,
+    fit_torus,
+)
+
+
+def _region(pts, nrm):
+    return Region.from_points(pts, nrm)
+
+
+def _sample_plane(n=400, seed=0):
+    rng = np.random.default_rng(seed)
+    uv = rng.uniform(-5, 5, size=(n, 2))
+    pts = np.column_stack([uv[:, 0], uv[:, 1], np.full(n, 2.0)])  # z = 2 plane
+    normals = np.tile([0.0, 0.0, 1.0], (n, 1))
+    return pts, normals
+
+
+def _sample_sphere(r=3.0, n=600, seed=1):
+    rng = np.random.default_rng(seed)
+    v = rng.normal(size=(n, 3))
+    v /= np.linalg.norm(v, axis=1, keepdims=True)
+    center = np.array([1.0, -2.0, 0.5])
+    return center + r * v, v
+
+
+def _sample_cylinder(r=2.0, h=10.0, n=800, seed=2):
+    rng = np.random.default_rng(seed)
+    theta = rng.uniform(0, 2 * math.pi, n)
+    z = rng.uniform(0, h, n)
+    pts = np.column_stack([r * np.cos(theta), r * np.sin(theta), z])
+    normals = np.column_stack([np.cos(theta), np.sin(theta), np.zeros(n)])
+    return pts, normals
+
+
+def _sample_cone(r1=4.0, half_angle_deg=20.0, h=8.0, n=900, seed=3):
+    rng = np.random.default_rng(seed)
+    slope = math.tan(math.radians(half_angle_deg))
+    theta = rng.uniform(0, 2 * math.pi, n)
+    z = rng.uniform(0, h, n)
+    r = r1 + slope * z
+    pts = np.column_stack([r * np.cos(theta), r * np.sin(theta), z])
+    # Outward normal of a cone tilts by the half-angle.
+    ca, sa = math.cos(math.radians(half_angle_deg)), math.sin(math.radians(half_angle_deg))
+    normals = np.column_stack([ca * np.cos(theta), ca * np.sin(theta), -sa * np.ones(n)])
+    normals /= np.linalg.norm(normals, axis=1, keepdims=True)
+    return pts, normals
+
+
+def _sample_torus(big_r=5.0, r=1.5, n_major=64, n_minor=24, seed=4):
+    # Regular grid, like a real torus mesh (centroid = exact centre).
+    u = np.linspace(0, 2 * math.pi, n_major, endpoint=False)
+    v = np.linspace(0, 2 * math.pi, n_minor, endpoint=False)
+    uu, vv = np.meshgrid(u, v)
+    uu, vv = uu.ravel(), vv.ravel()
+    rr = big_r + r * np.cos(vv)
+    pts = np.column_stack([rr * np.cos(uu), rr * np.sin(uu), r * np.sin(vv)])
+    # Outward normal points from the spine circle to the surface point.
+    normals = np.column_stack([np.cos(vv) * np.cos(uu), np.cos(vv) * np.sin(uu), np.sin(vv)])
+    center = np.array([2.0, -1.0, 0.5])
+    return pts + center, normals
+
+
+def _sample_box(hx=2.0, hy=3.0, hz=4.0, seed=5, rot=True):
+    # Sample points on the 6 faces of a (optionally rotated) box.
+    rng = np.random.default_rng(seed)
+    pts, nrm = [], []
+    axes = np.eye(3)
+    if rot:  # a fixed arbitrary rotation
+        th = 0.7
+        rz = np.array([[math.cos(th), -math.sin(th), 0],
+                       [math.sin(th), math.cos(th), 0], [0, 0, 1]])
+        axes = rz @ axes
+    half = [hx, hy, hz]
+    for k in range(3):
+        for sgn in (-1, 1):
+            uv = rng.uniform(-1, 1, size=(40, 2))
+            o = [i for i in range(3) if i != k]
+            local = np.zeros((40, 3))
+            local[:, k] = sgn * half[k]
+            local[:, o[0]] = uv[:, 0] * half[o[0]]
+            local[:, o[1]] = uv[:, 1] * half[o[1]]
+            pts.append(local @ axes.T)
+            n = np.zeros((40, 3)); n[:, k] = sgn
+            nrm.append(n @ axes.T)
+    return np.vstack(pts), np.vstack(nrm)
+
+
+def _check(name, ok, detail=""):
+    status = "PASS" if ok else "FAIL"
+    print(f"[{status}] {name} {detail}")
+    return ok
+
+
+def main():
+    results = []
+
+    pts, nrm = _sample_plane()
+    r = fit_plane(_region(pts, nrm))
+    results.append(_check("plane", r.rms < 1e-9 and abs(abs(r.params['normal'][2]) - 1) < 1e-6,
+                          f"rms={r.rms:.2e}"))
+
+    pts, nrm = _sample_sphere()
+    r = fit_sphere(_region(pts, nrm))
+    results.append(_check("sphere", r.rms < 1e-6 and abs(r.params['radius'] - 3.0) < 1e-4,
+                          f"r={r.params['radius']:.4f} rms={r.rms:.2e}"))
+
+    pts, nrm = _sample_cylinder()
+    r = fit_cylinder(_region(pts, nrm))
+    results.append(_check("cylinder", r.rms < 1e-6 and abs(r.params['radius'] - 2.0) < 1e-3,
+                          f"r={r.params['radius']:.4f} h={r.params['height']:.3f} rms={r.rms:.2e}"))
+
+    pts, nrm = _sample_cone()
+    r = fit_cone(_region(pts, nrm))
+    ok_cone = r is not None and r.rms < 1e-3
+    results.append(_check("cone", ok_cone,
+                          f"r1={r.params['radius1']:.3f} r2={r.params['radius2']:.3f} rms={r.rms:.2e}"
+                          if r else "no fit"))
+
+    pts, nrm = _sample_torus()
+    r = fit_torus(_region(pts, nrm))
+    ok_torus = (r is not None and r.rms < 1e-3
+                and abs(r.params['major_radius'] - 5.0) < 1e-2
+                and abs(r.params['minor_radius'] - 1.5) < 1e-2)
+    results.append(_check("torus", ok_torus,
+                          f"R={r.params['major_radius']:.4f} r={r.params['minor_radius']:.4f} rms={r.rms:.2e}"
+                          if r else "no fit"))
+
+    pts, nrm = _sample_box()
+    r = fit_box(_region(pts, nrm))
+    hs = sorted([r.params['hx'], r.params['hy'], r.params['hz']]) if r else []
+    ok_box = r is not None and r.rms < 1e-9 and hs == sorted([2.0, 3.0, 4.0]) or (
+        r is not None and r.rms < 1e-6 and
+        all(abs(a - b) < 1e-3 for a, b in zip(sorted([r.params['hx'], r.params['hy'],
+            r.params['hz']]), [2.0, 3.0, 4.0])))
+    results.append(_check("box (rotated)", ok_box,
+                          f"half={hs} rms={r.rms:.2e}" if r else "no fit"))
+
+    # AUTO should pick the right kind on each clean sample.
+    for name, sampler in [("plane", _sample_plane), ("sphere", _sample_sphere),
+                          ("cylinder", _sample_cylinder), ("torus", _sample_torus),
+                          ("box", _sample_box)]:
+        pts, nrm = sampler()
+        r = fit_auto(_region(pts, nrm))
+        results.append(_check(f"auto->{name}", r is not None and r.kind == name.upper(),
+                              f"got {r.kind if r else None}"))
+
+    print(f"\n{sum(results)}/{len(results)} passed")
+    sys.exit(0 if all(results) else 1)
+
+
+if __name__ == "__main__":
+    main()

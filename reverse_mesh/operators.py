@@ -1,0 +1,482 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Operators: extract the selected region, fit a primitive, optionally build it."""
+
+import datetime
+import math
+import os
+import subprocess
+import sys
+
+import bmesh
+import bpy
+import numpy as np
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, StringProperty
+from bpy.types import Operator
+from bpy_extras.io_utils import ExportHelper
+from mathutils import Matrix, Vector
+
+from . import build, occ_export, step_export
+from .fitting import FITTERS, Region, fit_auto
+
+
+def occt_lib_dir(create=False):
+    """Writable dir where the optional OCCT binding is installed (--target).
+
+    Returns None outside a real extension context (e.g. when the package is
+    imported directly in tests), where ``extension_path_user`` is unavailable.
+    """
+    try:
+        return bpy.utils.extension_path_user(__package__, path="occt_lib", create=create)
+    except Exception:
+        return None
+
+
+def ensure_occt_on_path():
+    """Put the installed OCCT lib dir on sys.path so the binding can import."""
+    d = occt_lib_dir(create=False)
+    if d and os.path.isdir(d) and d not in sys.path:
+        sys.path.insert(0, d)
+
+
+def _region_from_faces(faces, mw, nmat):
+    """Build a world-space :class:`Region` from a list of bmesh faces."""
+    verts = {v for f in faces for v in f.verts}
+    points = np.array([tuple(mw @ v.co) for v in verts], dtype=float)
+    face_points = np.array([tuple(mw @ f.calc_center_median()) for f in faces], dtype=float)
+    face_normals = np.array(
+        [tuple((nmat @ f.normal).normalized()) for f in faces], dtype=float
+    )
+    return Region(points=points, face_points=face_points, face_normals=face_normals)
+
+
+def _selected_faces(obj):
+    return [f for f in bmesh.from_edit_mesh(obj.data).faces if f.select]
+
+
+def _segment_faces(faces, angle_threshold_rad):
+    """Group selected faces into smooth-connected regions.
+
+    Two edge-adjacent faces join the same region when the angle between their
+    normals is within ``angle_threshold_rad``. Sharp creases (a cube's 90° edges)
+    split regions; gently-curving faces (a cylinder's side) stay together.
+    """
+    selected = set(faces)
+    visited = set()
+    regions = []
+    for seed in faces:
+        if seed in visited:
+            continue
+        region = [seed]
+        visited.add(seed)
+        stack = [seed]
+        while stack:
+            f = stack.pop()
+            for edge in f.edges:
+                for nf in edge.link_faces:
+                    if nf in selected and nf not in visited:
+                        if f.normal.angle(nf.normal, math.pi) <= angle_threshold_rad:
+                            visited.add(nf)
+                            region.append(nf)
+                            stack.append(nf)
+        regions.append(region)
+    return regions
+
+
+class REVERSE_OT_fit_selection(Operator):
+    """Fit an analytic primitive to the selected mesh faces"""
+
+    bl_idname = "reverse.fit_selection"
+    bl_label = "Fit Primitive to Selection"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and obj.type == "MESH" and obj.mode == "EDIT"
+
+    def _fit_region(self, region, settings):
+        kind = settings.primitive_type
+        return fit_auto(region) if kind == "AUTO" else FITTERS[kind](region)
+
+    def _record(self, context, settings, result, obj, build_objects):
+        """Build the clean object (optional) and append a feature entry."""
+        op = settings.default_operation
+        obj_name = ""
+        if build_objects:
+            new_obj = build.build_object(context, result, settings.segments, operation=op)
+            obj_name = new_obj.name
+        item = settings.features.add()
+        item.kind = result.kind
+        item.summary = result.summary
+        item.rms = result.rms
+        item.max_error = result.max_error
+        item.object_name = obj_name
+        item.operation = op
+        settings.active_feature = len(settings.features) - 1
+
+    def execute(self, context):
+        settings = context.scene.reverse
+        obj = context.active_object
+
+        faces = _selected_faces(obj)
+        if not faces:
+            self.report({"WARNING"}, "Select at least one face in Edit Mode")
+            return {"CANCELLED"}
+
+        mw = obj.matrix_world
+        nmat = mw.to_3x3().inverted_safe().transposed()
+
+        if settings.segment_regions:
+            clusters = _segment_faces(faces, math.radians(settings.segment_angle))
+        else:
+            clusters = [faces]
+
+        regions = [_region_from_faces(c, mw, nmat) for c in clusters]
+
+        # In single-fit mode, warn if the selection clearly spans several surfaces.
+        if not settings.segment_regions:
+            n_parts = len(_segment_faces(faces, math.radians(settings.segment_angle)))
+            if n_parts > 1:
+                self.report(
+                    {"WARNING"},
+                    f"Selection spans ~{n_parts} surfaces — enable 'Segment regions' "
+                    "to fit each separately (e.g. a cube → 6 planes).",
+                )
+
+        # Build all clean objects in Object Mode so we don't disturb the edit bmesh.
+        prev_mode = obj.mode
+        if settings.create_object:
+            bpy.ops.object.mode_set(mode="OBJECT")
+
+        results = []
+        for region in regions:
+            if len(region.points) < 3:
+                continue
+            result = self._fit_region(region, settings)
+            if result is not None:
+                self._record(context, settings, result, obj, settings.create_object)
+                results.append(result)
+
+        if settings.create_object:
+            bpy.ops.object.mode_set(mode=prev_mode)
+
+        if not results:
+            self.report({"WARNING"}, "Could not fit any primitive to the selection")
+            return {"CANCELLED"}
+
+        if len(results) == 1:
+            r = results[0]
+            level = {"WARNING"} if r.rel_rms > settings.tolerance else {"INFO"}
+            self.report(level, f"{r.summary}  ·  RMS {r.rms:.4g} ({r.rel_rms * 100:.2f}%)")
+        else:
+            kinds = {}
+            for r in results:
+                kinds[r.kind] = kinds.get(r.kind, 0) + 1
+            summary = ", ".join(f"{n}× {k.lower()}" for k, n in sorted(kinds.items()))
+            self.report({"INFO"}, f"Fitted {len(results)} regions: {summary}")
+        return {"FINISHED"}
+
+
+class REVERSE_OT_clear_features(Operator):
+    """Clear the session feature list (does not delete created objects)"""
+
+    bl_idname = "reverse.clear_features"
+    bl_label = "Clear Feature List"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        context.scene.reverse.features.clear()
+        context.scene.reverse.active_feature = 0
+        return {"FINISHED"}
+
+
+class REVERSE_OT_set_operation(Operator):
+    """Set the boolean role (Add / Subtract) of the active fitted feature"""
+
+    bl_idname = "reverse.set_operation"
+    bl_label = "Set Feature Role"
+    bl_options = {"REGISTER", "UNDO"}
+
+    operation: EnumProperty(
+        items=[("ADD", "Add", "Material / base body"),
+               ("SUBTRACT", "Subtract", "A cutter to subtract (e.g. a hole)")],
+        default="ADD",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        s = context.scene.reverse
+        return 0 <= s.active_feature < len(s.features)
+
+    def execute(self, context):
+        s = context.scene.reverse
+        item = s.features[s.active_feature]
+        item.operation = self.operation
+        obj = bpy.data.objects.get(item.object_name) if item.object_name else None
+        if obj is not None and "reverse" in obj:
+            obj["reverse"]["op"] = self.operation
+            obj.color = ((0.85, 0.25, 0.25, 1.0) if self.operation == "SUBTRACT"
+                         else (0.8, 0.8, 0.8, 1.0))
+        return {"FINISHED"}
+
+
+class REVERSE_OT_select_feature_object(Operator):
+    """Select the clean object created for the active feature"""
+
+    bl_idname = "reverse.select_feature_object"
+    bl_label = "Select Feature Object"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        s = context.scene.reverse
+        return 0 <= s.active_feature < len(s.features)
+
+    def execute(self, context):
+        s = context.scene.reverse
+        name = s.features[s.active_feature].object_name
+        target = bpy.data.objects.get(name) if name else None
+        if target is None:
+            self.report({"WARNING"}, "No object linked to this feature")
+            return {"CANCELLED"}
+        if context.object and context.object.mode == "EDIT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+        bpy.ops.object.select_all(action="DESELECT")
+        target.select_set(True)
+        context.view_layer.objects.active = target
+        return {"FINISHED"}
+
+
+# Which params are points / directions / lengths, for transforming to world.
+_PARAM_KINDS = {
+    "PLANE": {"points": ["point"], "dirs": ["normal", "e1", "e2"],
+              "lengths": ["half_u", "half_v"]},
+    "BOX": {"points": ["center"], "dirs": ["ax", "ay", "az"],
+            "lengths": ["hx", "hy", "hz"]},
+    "CYLINDER": {"points": ["base"], "dirs": ["axis"], "lengths": ["radius", "height"]},
+    "CONE": {"points": ["base", "apex"], "dirs": ["axis"],
+             "lengths": ["radius1", "radius2", "height"]},
+    "SPHERE": {"points": ["center"], "dirs": [], "lengths": ["radius"]},
+    "TORUS": {"points": ["center"], "dirs": ["axis"],
+              "lengths": ["major_radius", "minor_radius"]},
+}
+
+
+def _feature_from_object(obj, user_scale):
+    """Read an object's stored fit params and return an export feature dict.
+
+    Applies any transform the object has received since it was created (so moving
+    the clean object is honoured), then the user's unit scale.
+    """
+    data = obj.get("reverse")
+    if data is None:
+        return None
+    kind = data["kind"]
+    schema = _PARAM_KINDS.get(kind)
+    if schema is None:
+        return None
+
+    mw = obj.matrix_world
+    xform = data.get("_xform")
+    if xform is not None and len(xform) == 16:
+        x = list(xform)
+        creation = Matrix([x[0:4], x[4:8], x[8:12], x[12:16]])
+        try:
+            delta = mw @ creation.inverted()
+        except ValueError:
+            delta = Matrix.Identity(4)
+    else:
+        delta = Matrix.Identity(4)
+
+    rot = delta.to_3x3()
+    obj_scale = sum(delta.to_scale()) / 3.0
+    s = user_scale
+
+    params = {}
+    for key in schema["points"]:
+        if key in data.keys():
+            v = delta @ Vector(tuple(data[key]))
+            params[key] = (v.x * s, v.y * s, v.z * s)
+    for key in schema["dirs"]:
+        if key in data.keys():
+            d = (rot @ Vector(tuple(data[key]))).normalized()
+            params[key] = (d.x, d.y, d.z)
+    for key in schema["lengths"]:
+        if key in data.keys():
+            params[key] = float(data[key]) * obj_scale * s
+    if "half_angle" in data.keys():
+        params["half_angle"] = float(data["half_angle"])
+
+    rgb = tuple(obj.color[:3])
+    color = rgb if any(abs(c - 1.0) > 1e-4 for c in rgb) else None
+    op = data["op"] if "op" in data.keys() else "ADD"
+    return {"kind": kind, "name": obj.name, "params": params, "color": color, "op": op}
+
+
+class REVERSE_OT_export_step(Operator, ExportHelper):
+    """Export fitted analytic primitives as an AP242 STEP assembly"""
+
+    bl_idname = "reverse.export_step"
+    bl_label = "Export STEP (AP242)"
+    bl_options = {"REGISTER"}
+
+    filename_ext = ".step"
+    filter_glob: StringProperty(default="*.step;*.stp", options={"HIDDEN"})
+
+    backend: EnumProperty(
+        name="Backend",
+        description="How to write the STEP file",
+        items=[
+            ("AUTO", "Auto", "Use OCCT if installed, else the pure-Python writer"),
+            ("PUREPYTHON", "Pure Python", "Built-in analytic writer (no dependencies)"),
+            ("OCCT", "OCCT kernel", "Use OpenCASCADE (enables merging into one solid)"),
+        ],
+        default="AUTO",
+    )
+    merge_solids: BoolProperty(
+        name="Merge into one solid",
+        description="Fuse all fitted solids into a single watertight body (OCCT only)",
+        default=False,
+    )
+    unit: EnumProperty(
+        name="Unit",
+        description="Length unit declared in the STEP file",
+        items=[("MM", "Millimeters", ""), ("M", "Meters", ""), ("IN", "Inches", "")],
+        default="MM",
+    )
+    scale: FloatProperty(
+        name="Scale",
+        description="Factor applied to all coordinates (e.g. 1000 to write metres as mm)",
+        default=1.0, min=1e-6, max=1e6,
+    )
+    use_selection: BoolProperty(
+        name="Selected only",
+        description="Export only selected Reverse objects (otherwise all in the scene)",
+        default=False,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return any("reverse" in o for o in context.scene.objects)
+
+    def execute(self, context):
+        sources = context.selected_objects if self.use_selection else context.scene.objects
+        features = []
+        for o in sources:
+            if o.type == "MESH" and "reverse" in o:
+                feat = _feature_from_object(o, self.scale)
+                if feat is not None:
+                    features.append(feat)
+
+        if not features:
+            self.report({"WARNING"}, "No fitted (Reverse) objects found to export")
+            return {"CANCELLED"}
+
+        name = os.path.splitext(os.path.basename(self.filepath))[0] or "Reverse"
+
+        ensure_occt_on_path()
+        use_occt = self.backend == "OCCT" or (self.backend == "AUTO" and occ_export.is_available())
+        if self.backend == "OCCT" and not occ_export.is_available():
+            self.report({"WARNING"}, "OCCT not installed — use the Install button. Falling back to pure-Python.")
+            use_occt = False
+
+        if use_occt:
+            try:
+                info = occ_export.export(features, self.filepath, unit=self.unit,
+                                         merge=self.merge_solids)
+                self.report({"INFO"}, f"Exported via OCCT: {info}")
+                return {"FINISHED"}
+            except Exception as exc:
+                self.report({"WARNING"}, f"OCCT export failed ({exc}); using pure-Python")
+
+        text = step_export.build_step(
+            features,
+            unit=self.unit,
+            product_name=name,
+            timestamp=datetime.datetime.now().isoformat(timespec="seconds"),
+            filename=os.path.basename(self.filepath),
+        )
+        with open(self.filepath, "w", encoding="ascii", errors="replace") as fp:
+            fp.write(text)
+
+        self.report({"INFO"}, f"Exported {len(features)} primitives → {os.path.basename(self.filepath)}")
+        return {"FINISHED"}
+
+
+class REVERSE_OT_install_occt(Operator):
+    """Download and install the OpenCASCADE binding (cadquery-ocp) for STEP export.
+
+    Installs into the add-on's user folder (not Blender's read-only files), so it
+    survives Blender updates and needs no admin rights. ~100 MB download.
+    """
+
+    bl_idname = "reverse.install_occt"
+    bl_label = "Install OCCT (cadquery-ocp)"
+    bl_options = {"REGISTER"}
+
+    @classmethod
+    def poll(cls, context):
+        ensure_occt_on_path()
+        return not occ_export.is_available()
+
+    def execute(self, context):
+        target = occt_lib_dir(create=True)
+        if not target:
+            self.report({"ERROR"}, "Could not resolve the add-on data folder")
+            return {"CANCELLED"}
+        context.window.cursor_set("WAIT")
+        try:
+            subprocess.run([sys.executable, "-m", "ensurepip"],
+                           capture_output=True, text=True)
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--upgrade",
+                 "--target", target, "cadquery-ocp"],
+                capture_output=True, text=True,
+            )
+        except Exception as exc:
+            context.window.cursor_set("DEFAULT")
+            self.report({"ERROR"}, f"Install failed to start: {exc}")
+            return {"CANCELLED"}
+        finally:
+            context.window.cursor_set("DEFAULT")
+
+        if result.returncode != 0:
+            tail = (result.stderr or result.stdout)[-400:]
+            self.report({"ERROR"}, f"pip install failed: {tail}")
+            return {"CANCELLED"}
+
+        ensure_occt_on_path()
+        import importlib
+        importlib.invalidate_caches()
+        if occ_export.is_available():
+            self.report({"INFO"}, f"OCCT installed ({occ_export.backend_name()}) — restart not required")
+        else:
+            self.report({"WARNING"}, "Installed, but the binding did not import. A Blender restart may be needed.")
+        return {"FINISHED"}
+
+
+def menu_export(self, context):
+    self.layout.operator(REVERSE_OT_export_step.bl_idname, text="Reverse STEP (AP242) (.step)")
+
+
+classes = (
+    REVERSE_OT_fit_selection,
+    REVERSE_OT_clear_features,
+    REVERSE_OT_set_operation,
+    REVERSE_OT_select_feature_object,
+    REVERSE_OT_export_step,
+    REVERSE_OT_install_occt,
+)
+
+
+def register():
+    ensure_occt_on_path()  # pick up a previously-installed binding
+    for cls in classes:
+        bpy.utils.register_class(cls)
+    bpy.types.TOPBAR_MT_file_export.append(menu_export)
+
+
+def unregister():
+    bpy.types.TOPBAR_MT_file_export.remove(menu_export)
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)

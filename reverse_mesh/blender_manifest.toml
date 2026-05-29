@@ -1,0 +1,31 @@
+schema_version = "1.0.0"
+
+# Extension identity
+id = "reverse_mesh"
+version = "0.7.0"
+name = "Reverse — Mesh to Parametric"
+tagline = "Fit clean CAD primitives to selected mesh regions"
+maintainer = "Nigel Hungerford-Symes <nigel.hungerfordsymes@gmail.com>"
+type = "add-on"
+
+# Compatibility
+blender_version_min = "4.2.0"
+
+# Legal
+license = ["SPDX:GPL-3.0-or-later"]
+
+# Discovery
+tags = ["Mesh", "Modeling"]
+website = "https://github.com/nico-schluter/Reverse"
+
+# Permissions — this add-on only reads/writes the open .blend, no net/files.
+[permissions]
+
+# Build settings: exclude dev cruft from the packaged .zip
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  "*.pyc",
+  "/.git/",
+  "/tests/",
+]

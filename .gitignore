@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Build / release artifacts
+/dist/
+
+# Test outputs
+*.step
+*.stp
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
