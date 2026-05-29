@@ -51,11 +51,41 @@ def _imp(module, *names):
     raise ImportError(f"Cannot import {names} from {module}: {last}")
 
 
-def export(features, filepath, *, unit="MM", merge=False):
+def _grow_cutter(kind, p, frac):
+    """Extend a subtractive cutter along its axis so its ends overshoot the body.
+
+    When a cutter's end cap is coplanar with a face of the base solid, the boolean
+    has coincident faces and may not open the hole cleanly. Lengthening the cutter
+    by ``frac`` of its own extent at each end removes only "air" beyond the body,
+    guaranteeing a clean through-cut. ``frac`` is a fraction (0.05 = 5% each end).
+    """
+    if frac <= 0:
+        return p
+    q = dict(p)
+    if kind == "CYLINDER":
+        # 'base' is the axial midpoint, so growing the height extends both ends.
+        q["height"] = p["height"] * (1.0 + 2.0 * frac)
+    elif kind == "CONE":
+        h = p["height"]
+        g = frac * h
+        slope = (p["radius2"] - p["radius1"]) / h if h else 0.0
+        axis = tuple(float(c) for c in p["axis"])
+        base = tuple(float(c) for c in p["base"])
+        q["base"] = _sub(base, _scale(axis, g))      # push the r1 end outward
+        q["height"] = h + 2.0 * g
+        q["radius1"] = max(0.0, p["radius1"] - slope * g)
+        q["radius2"] = max(0.0, p["radius2"] + slope * g)
+    # Boxes / spheres / tori have no single pair of "ends"; left unchanged.
+    return q
+
+
+def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05):
     """Build OCCT solids from ``features`` and write an AP242 STEP file.
 
     Returns a short status string. If ``merge`` is set, all solids are fused into
-    a single body before writing (planes are added alongside as faces).
+    a single body before writing (planes are added alongside as faces). Subtractive
+    cylinders/cones are extended by ``overshoot`` (fraction per end) so their ends
+    cut cleanly through coplanar faces.
     """
     (gp_Pnt, gp_Dir, gp_Ax2, gp_Ax3, gp_Pln) = _imp(
         "gp", "gp_Pnt", "gp_Dir", "gp_Ax2", "gp_Ax3", "gp_Pln")
@@ -80,7 +110,11 @@ def export(features, filepath, *, unit="MM", merge=False):
 
     adds, subs, faces = [], [], []
     for feat in features:
-        kind, p = feat["kind"], feat["params"]
+        kind = feat["kind"]
+        p = feat["params"]
+        op = feat.get("op", "ADD")
+        if op == "SUBTRACT":
+            p = _grow_cutter(kind, p, overshoot)   # overshoot so ends cut clean
         try:
             shape, is_solid = _make_shape(
                 kind, p, gp_Pnt, gp_Dir, gp_Ax3, gp_Pln,
@@ -92,7 +126,7 @@ def export(features, filepath, *, unit="MM", merge=False):
             continue
         if not is_solid:
             faces.append(shape)            # planes can only add
-        elif feat.get("op", "ADD") == "SUBTRACT":
+        elif op == "SUBTRACT":
             subs.append(shape)
         else:
             adds.append(shape)

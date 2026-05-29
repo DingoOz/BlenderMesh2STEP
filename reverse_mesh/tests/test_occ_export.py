@@ -112,6 +112,45 @@ def main():
     except OSError:
         pass
 
+    # Coplanar ends: a cutter whose height exactly spans the box (z -2..2). The
+    # overshoot must still open a clean through-hole on the coplanar top/bottom.
+    from OCP.TopAbs import TopAbs_FACE
+    coplanar = [
+        {"kind": "BOX", "op": "ADD", "name": "base", "params": {
+            "center": (0, 0, 0), "ax": (1, 0, 0), "ay": (0, 1, 0), "az": (0, 0, 1),
+            "hx": 2.0, "hy": 2.0, "hz": 2.0}},
+        {"kind": "CYLINDER", "op": "SUBTRACT", "name": "hole", "params": {
+            "base": (0, 0, 0), "axis": (0, 0, 1), "radius": 1.0, "height": 4.0}},  # exactly spans
+    ]
+    out4 = os.path.join(os.path.dirname(__file__), "occ_coplanar.step")
+    occ_export.export(coplanar, out4, unit="MM", merge=False, overshoot=0.05)
+    r4 = STEPControl_Reader()
+    r4.ReadFile(out4)
+    r4.TransferRoots()
+    sh4 = r4.OneShape()
+    n4 = 0
+    e4 = TopExp_Explorer(sh4, TopAbs_SOLID)
+    while e4.More():
+        n4 += 1
+        e4.Next()
+    nf4 = 0
+    e4 = TopExp_Explorer(sh4, TopAbs_FACE)
+    while e4.More():
+        nf4 += 1
+        e4.Next()
+    pr = GProp_GProps(); BRepGProp.VolumeProperties_s(sh4, pr); v4 = pr.Mass()
+    # A clean through-hole box has 7 faces: 4 sides + holed top + holed bottom + bore.
+    ok4 = (n4 == 1 and BRepCheck_Analyzer(sh4).IsValid()
+           and abs(v4 - expected) < 0.5 and nf4 == 7)
+    print(f"[info] coplanar cut: solids={n4} faces={nf4} volume={v4:.3f} valid={BRepCheck_Analyzer(sh4).IsValid()}")
+    if not ok4:
+        fail(f"coplanar through-hole not clean (faces={nf4}, vol={v4:.3f})")
+    print("[ok] coplanar cutter ends → clean through-hole (7 faces, bore opens both ends)")
+    try:
+        os.remove(out4)
+    except OSError:
+        pass
+
     for f in (out, out2):
         try:
             os.remove(f)

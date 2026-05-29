@@ -338,6 +338,14 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
         description="Fuse all fitted solids into a single watertight body (OCCT only)",
         default=False,
     )
+    cutter_overshoot: FloatProperty(
+        name="Cutter overshoot",
+        description=(
+            "Extend subtractive cylinders/cones by this fraction at each end so a "
+            "hole cuts cleanly through coplanar faces (OCCT only). 0 disables"
+        ),
+        default=0.05, min=0.0, max=1.0, subtype="FACTOR",
+    )
     unit: EnumProperty(
         name="Unit",
         description="Length unit declared in the STEP file",
@@ -383,7 +391,8 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
         if use_occt:
             try:
                 info = occ_export.export(features, self.filepath, unit=self.unit,
-                                         merge=self.merge_solids)
+                                         merge=self.merge_solids,
+                                         overshoot=self.cutter_overshoot)
                 self.report({"INFO"}, f"Exported via OCCT: {info}")
                 return {"FINISHED"}
             except Exception as exc:

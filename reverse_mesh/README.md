@@ -66,6 +66,12 @@ the Subtract solids out, producing **one watertight solid with real holes**
 Subtract requires OCCT (booleans need a kernel); the pure-Python writer ignores
 roles and exports every primitive separately.
 
+**Cutter overshoot.** When a cutter's end cap is exactly coplanar with a face of
+the base body, the boolean has coincident faces and may not open the hole. The
+exporter automatically extends subtractive cylinders/cones slightly past each end
+(the **Cutter overshoot** option, 5% by default) so the bore cuts cleanly through
+and the hole opens on the coplanar surface. Set it to 0 for an exact blind pocket.
+
 ### Optional OCCT kernel backend
 
 For **booleans and merging fitted solids into one watertight body** (and a
