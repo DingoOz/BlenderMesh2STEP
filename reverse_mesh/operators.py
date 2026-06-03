@@ -815,6 +815,14 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
         ),
         default=False,
     )
+    semantic_pmi: BoolProperty(
+        name="Embed semantic PMI",
+        description=(
+            "Embed AP242 semantic dimensions (DIMENSIONAL_SIZE) in the STEP so CAD "
+            "reads diameters/lengths as queryable PMI (pure-Python writer only)"
+        ),
+        default=False,
+    )
 
     @classmethod
     def poll(cls, context):
@@ -868,6 +876,7 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
             product_name=name,
             timestamp=datetime.datetime.now().isoformat(timespec="seconds"),
             filename=os.path.basename(self.filepath),
+            pmi=self.semantic_pmi,
         )
         with open(self.filepath, "w", encoding="ascii", errors="replace") as fp:
             fp.write(text)

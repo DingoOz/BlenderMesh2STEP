@@ -461,12 +461,13 @@ _BUILDERS = {
 # --- top-level assembly + product structure -----------------------------------
 
 def build_step(features, *, unit="MM", product_name="Reverse",
-               author="", organization="", timestamp="", filename=""):
+               author="", organization="", timestamp="", filename="", pmi=False):
     """Return the full STEP file text for ``features``.
 
     ``unit`` is one of 'MM', 'M', 'IN' (controls only the declared SI unit/prefix;
     coordinates are written as given). Items are assembled into one shape
-    representation with colour styling.
+    representation with colour styling. With ``pmi=True`` each feature-of-size also
+    gets a semantic AP242 dimension (DIMENSIONAL_SIZE) carrying its nominal value.
     """
     w = StepWriter()
 
@@ -483,7 +484,7 @@ def build_step(features, *, unit="MM", product_name="Reverse",
         styled.append(_style(w, item_id, color))
 
     # Geometric context with units + uncertainty.
-    ctx = _units_context(w, unit)
+    ctx, length_unit = _units_context(w, unit)
 
     # Representation: advanced brep if everything is a solid, else generic.
     all_solid = all(s for _, s in items) and bool(items)
@@ -501,7 +502,10 @@ def build_step(features, *, unit="MM", product_name="Reverse",
             + ",".join(str(s) for s in styled) + f"),{ctx})"
         )
 
-    _product_structure(w, rep, product_name)
+    _product, pds = _product_structure(w, rep, product_name)
+
+    if pmi:
+        _semantic_dimensions(w, features, pds, ctx, length_unit)
 
     header = _header(filename, author, organization, timestamp)
     return f"{header}\nDATA;\n{w.text()}\nENDSEC;\nEND-ISO-10303-21;\n"
@@ -520,6 +524,7 @@ def _style(w, item_id, color):
 
 
 def _units_context(w, unit):
+    """Return ``(context_id, length_unit_id)`` — the latter for PMI measures."""
     prefix = {"MM": ".MILLI.", "M": "$", "IN": ".MILLI."}.get(unit, ".MILLI.")
     length = w.add(f"( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT({prefix},.METRE.) )")
     angle = w.add("( NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.) )")
@@ -528,12 +533,43 @@ def _units_context(w, unit):
         f"UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-06),{length},"
         "'distance_accuracy_value','confusion accuracy')"
     )
-    return w.add(
+    ctx = w.add(
         f"( GEOMETRIC_REPRESENTATION_CONTEXT(3) "
         f"GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT(({unc})) "
         f"GLOBAL_UNIT_ASSIGNED_CONTEXT(({length},{angle},{solid})) "
         f"REPRESENTATION_CONTEXT('Context','3D Context with UNIT and UNCERTAINTY') )"
     )
+    return ctx, length
+
+
+def _semantic_dimensions(w, features, pds, ctx, length_unit):
+    """Emit AP242 semantic PMI: a DIMENSIONAL_SIZE per feature-of-size.
+
+    Each becomes a SHAPE_ASPECT on the product definition shape, a DIMENSIONAL_SIZE
+    naming it, and a SHAPE_DIMENSION_REPRESENTATION carrying the nominal value —
+    so a CAD package reads the diameter/length as semantic, queryable PMI rather
+    than just geometry. Returns the number of dimensions written.
+    """
+    n = 0
+    for feat in features:
+        kind = feat["kind"]
+        p = feat["params"]
+        dims = []                                       # (label, value)
+        if kind in ("CYLINDER", "FILLET", "SPHERE"):
+            dims.append(("diameter", 2.0 * p["radius"]))
+        elif kind == "CONE":
+            dims.append(("diameter", 2.0 * max(p["radius1"], p["radius2"])))
+        elif kind == "TORUS":
+            dims.append(("diameter", 2.0 * p["minor_radius"]))
+        for label, value in dims:
+            sa = w.add(f"SHAPE_ASPECT('{label}','',{pds},.T.)")
+            ds = w.add(f"DIMENSIONAL_SIZE({sa},'{label}')")
+            mri = w.add(f"MEASURE_REPRESENTATION_ITEM('{label}',"
+                        f"LENGTH_MEASURE({_num(value)}),{length_unit})")
+            sdr = w.add(f"SHAPE_DIMENSION_REPRESENTATION('',({mri}),{ctx})")
+            w.add(f"DIMENSIONAL_CHARACTERISTIC_REPRESENTATION({ds},{sdr})")
+            n += 1
+    return n
 
 
 def _product_structure(w, rep, name):
@@ -552,7 +588,7 @@ def _product_structure(w, rep, name):
     pd = w.add(f"PRODUCT_DEFINITION('design','',{pdf},{pd_ctx})")
     pds = w.add(f"PRODUCT_DEFINITION_SHAPE('','',{pd})")
     w.add(f"SHAPE_DEFINITION_REPRESENTATION({pds},{rep})")
-    return product
+    return product, pds
 
 
 def _header(filename, author, organization, timestamp):
