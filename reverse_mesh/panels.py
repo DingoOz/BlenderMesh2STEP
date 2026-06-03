@@ -68,6 +68,11 @@ class REVERSE_PT_main(Panel):
         box.prop(settings, "tolerance")
         box.prop(settings, "show_heatmap")
 
+        box.prop(settings, "use_ransac")
+        rsub = box.column(align=True)
+        rsub.enabled = settings.use_ransac
+        rsub.prop(settings, "ransac_threshold")
+
         box.prop(settings, "snap_enabled")
         snap = box.column(align=True)
         snap.enabled = settings.snap_enabled

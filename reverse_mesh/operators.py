@@ -17,7 +17,9 @@ from bpy_extras.io_utils import ExportHelper
 from mathutils import Matrix, Vector
 
 from . import build, occ_export, overlay, step_export
-from .fitting import FITTERS, Region, fit_auto, signed_distances, snap_result, summarize
+from .fitting import (
+    FITTERS, Region, fit_auto, fit_robust, signed_distances, snap_result, summarize,
+)
 from .fitting.common import deviation_color
 
 
@@ -127,6 +129,13 @@ class REVERSE_OT_fit_selection(Operator):
         if kind == "AUTO":
             result, cands = fit_auto(region, return_candidates=True)
             runner_up = self._format_candidates(cands)
+            if result is not None and settings.use_ransac:
+                # Keep AUTO's chosen kind, but refit it robustly to drop outliers.
+                result = fit_robust(region, FITTERS[result.kind],
+                                    rel_threshold=settings.ransac_threshold) or result
+        elif settings.use_ransac:
+            result = fit_robust(region, FITTERS[kind],
+                                rel_threshold=settings.ransac_threshold)
         else:
             result = FITTERS[kind](region)
         if result is not None and settings.snap_enabled:

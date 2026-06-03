@@ -578,3 +578,84 @@ def fit_auto(region: Region, return_candidates: bool = False):
     ]
     annotated.sort(key=lambda c: (not c["winner"], c["rel_rms"]))
     return best, annotated
+
+
+# Points/faces beyond this fraction of the region size are outliers. A fit this
+# clean already (relative RMS) is left untouched — RANSAC only kicks in when the
+# plain fit is poor, preserving machine-precision fits on clean selections.
+RANSAC_REL_THRESHOLD = 0.02
+_RANSAC_CLEAN = 1e-3
+_RANSAC_ITERS = 80
+_RANSAC_SAMPLE = 14          # small sample → decent odds of an outlier-free draw
+
+
+def _trim_to_inliers(region, result, thr):
+    """Region restricted to points/faces within ``thr`` of the fitted surface."""
+    p_mask = np.abs(signed_distances(result, region.points)) <= thr
+    if len(region.face_points):
+        f_mask = np.abs(signed_distances(result, region.face_points)) <= thr
+        fp = region.face_points[f_mask]
+        fn = region.face_normals[f_mask]
+    else:
+        f_mask = np.ones(0, dtype=bool)
+        fp, fn = region.face_points, region.face_normals
+    return Region(points=region.points[p_mask], face_points=fp, face_normals=fn), p_mask, f_mask
+
+
+def fit_robust(region: Region, fitter, rel_threshold=RANSAC_REL_THRESHOLD,
+               iters=_RANSAC_ITERS, seed=0) -> FitResult | None:
+    """Outlier-tolerant fit via RANSAC consensus, then a clean refit.
+
+    A few stray triangles in a selection (a chamfer, an N-gon that triangulated
+    oddly) drag a plain least-squares fit off — and trimming can't recover, since
+    the corrupted fit mis-ranks which points are outliers. Instead this fits many
+    small random samples, keeps the model with the most inliers (within
+    ``rel_threshold × region size``), and refits on that consensus set. Rejected
+    faces show up red in the fit-quality heatmap.
+
+    A selection that already fits cleanly is returned unchanged, so the
+    machine-precision behaviour on clean meshes is never disturbed.
+    """
+    base = fitter(region)
+    if base is None:
+        return None
+    if base.rel_rms < _RANSAC_CLEAN:
+        return base                                  # already excellent; no outliers
+
+    n_pts = len(region.points)
+    n_faces = len(region.face_points)
+    thr = rel_threshold * region_scale(region.points)
+    rng = np.random.default_rng(seed)
+    s_pts = min(n_pts, _RANSAC_SAMPLE)
+    s_faces = min(n_faces, _RANSAC_SAMPLE) if n_faces else 0
+
+    best_count, best_cand = -1, None
+    for _ in range(iters):
+        pid = rng.choice(n_pts, size=s_pts, replace=False)
+        if n_faces:
+            fid = rng.choice(n_faces, size=s_faces, replace=False)
+            sub = Region(points=region.points[pid],
+                         face_points=region.face_points[fid],
+                         face_normals=region.face_normals[fid])
+        else:
+            sub = Region(points=region.points[pid],
+                         face_points=region.face_points, face_normals=region.face_normals)
+        cand = fitter(sub)
+        if cand is None:
+            continue
+        count = int((np.abs(signed_distances(cand, region.points)) <= thr).sum())
+        if count > best_count:
+            best_count, best_cand = count, cand
+
+    # No usable consensus, or the best model already keeps everything (no outliers).
+    if best_cand is None or best_count >= n_pts:
+        return base
+
+    # Trim the full region (points AND faces) by the consensus model, then refit
+    # cleanly on the inliers — so outlier normals can't corrupt the final axis.
+    trimmed, p_mask, _ = _trim_to_inliers(region, best_cand, thr)
+    if len(trimmed.points) >= 3:
+        final = fitter(trimmed)
+        if final is not None:
+            return final
+    return base

@@ -22,6 +22,7 @@ from fitting import (  # noqa: E402
     fit_cone,
     fit_cylinder,
     fit_plane,
+    fit_robust,
     fit_sphere,
     fit_torus,
     signed_distances,
@@ -225,6 +226,20 @@ def main():
                and y[0] > 0.99 and y[1] > 0.99        # yellow midpoint
                and over == r)                          # clamped above 1
     results.append(_check("deviation colour ramp", ok_cmap, f"g={g[:3]} r={r[:3]}"))
+
+    # Robust fit (#13): stray outlier points must not corrupt the recovered radius.
+    pts, nrm = _sample_cylinder(r=2.0, h=10.0, n=400)
+    orng = np.random.default_rng(99)
+    out_pts = orng.uniform(-6, 6, size=(40, 3)); out_pts[:, 0] += 9.0   # off to the side
+    out_nrm = orng.normal(size=(40, 3)); out_nrm /= np.linalg.norm(out_nrm, axis=1, keepdims=True)
+    P = np.vstack([pts, out_pts]); N = np.vstack([nrm, out_nrm])
+    plain = fit_cylinder(_region(P, N))
+    robust = fit_robust(_region(P, N), fit_cylinder, rel_threshold=0.05)
+    err_plain = abs(plain.params["radius"] - 2.0)
+    err_robust = abs(robust.params["radius"] - 2.0)
+    results.append(_check("robust rejects outliers",
+                          robust is not None and err_robust < 0.05 and err_robust < err_plain,
+                          f"plain r={plain.params['radius']:.3f} robust r={robust.params['radius']:.3f}"))
 
     print(f"\n{sum(results)}/{len(results)} passed")
     sys.exit(0 if all(results) else 1)
