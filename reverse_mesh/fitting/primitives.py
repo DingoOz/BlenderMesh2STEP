@@ -309,6 +309,68 @@ def fit_torus(region: Region) -> FitResult | None:
                      summary=summarize("TORUS", params))
 
 
+def fit_fillet(region: Region) -> FitResult | None:
+    """Edge fillet (constant-radius rolling-ball blend) → a *partial* cylinder.
+
+    A fillet between two faces is a slice of a cylinder: the surface normals sweep
+    an arc rather than a full circle. The radius and axis come from the same
+    circle/axis fit as :func:`fit_cylinder` (the algebraic circle fit works on an
+    arc), and additionally we recover the *angular extent* of the arc — the
+    largest empty angular gap is the missing part — so the surface can be exported
+    as a trimmed patch. Returns ``None`` if the points actually wrap most of a full
+    circle (that's a cylinder, not a fillet).
+    """
+    points = region.points
+    normals = region.face_normals
+    if len(points) < 6:
+        return None
+
+    if len(normals) >= 3 and np.any(normals):
+        axis = smallest_singular_axis(normals)
+    else:
+        _, axis = best_plane_normal(points)
+
+    e1, e2 = orthonormal_basis(axis)
+    origin = points.mean(axis=0)
+    rel = points - origin
+    uv = np.column_stack([rel @ e1, rel @ e2])
+    center2d, radius, radial = fit_circle_2d(uv)
+    rms, max_err = residual_stats(radial)
+
+    # Angular extent about the fitted centre: the arc is everything but the
+    # single largest empty gap between consecutive (sorted) point angles.
+    ang = np.sort(np.arctan2(uv[:, 1] - center2d[1], uv[:, 0] - center2d[0]))
+    ext = np.concatenate([ang, [ang[0] + 2 * np.pi]])
+    gaps = np.diff(ext)
+    gi = int(np.argmax(gaps))
+    if gi == len(ang) - 1:                      # widest gap straddles ±π
+        u_min, u_max = float(ang[0]), float(ang[-1])
+    else:
+        u_min, u_max = float(ang[gi + 1]), float(ang[gi] + 2 * np.pi)
+    span = u_max - u_min
+    if span > np.radians(330.0):                # nearly closed → it's a cylinder
+        return None
+
+    w = rel @ axis
+    w_min, w_max = float(w.min()), float(w.max())
+    height = w_max - w_min
+    center3d = (origin + e1 * center2d[0] + e2 * center2d[1]
+                + axis * ((w_min + w_max) / 2.0))
+
+    params = {
+        "base": center3d,          # on the axis, at the axial midpoint
+        "axis": axis,
+        "ref": e1,                 # u = 0 reference direction
+        "radius": radius,
+        "height": height,
+        "u_min": u_min,            # arc start angle from ref (radians)
+        "u_max": u_max,            # arc end angle (u_max > u_min)
+        "_scale": region_scale(points),
+    }
+    return FitResult(kind="FILLET", rms=rms, max_error=max_err, params=params,
+                     summary=f"Fillet · r={radius:.4g} · {np.degrees(span):.0f}°")
+
+
 def _cluster_axes(normals, tol_cos=0.966):
     """Return the dominant ± normal directions (box face axes), most-supported first.
 
@@ -466,7 +528,7 @@ def signed_distances(result: FitResult, pts: np.ndarray) -> np.ndarray:
         return (pts - np.asarray(p["point"])) @ _unit(np.asarray(p["normal"]))
     if result.kind == "SPHERE":
         return np.linalg.norm(pts - np.asarray(p["center"]), axis=1) - p["radius"]
-    if result.kind == "CYLINDER":
+    if result.kind in ("CYLINDER", "FILLET"):
         rel = pts - np.asarray(p["base"])
         axis = _unit(np.asarray(p["axis"]))
         w = rel @ axis

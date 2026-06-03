@@ -124,6 +124,33 @@ def main():
         fail("heatmap off: overlay was not cleared")
     print("[ok] heatmap cleared when toggled off")
 
+    # Fillet (#5): a 90° arc of a cylinder wall fits as a trimmed partial cylinder.
+    import math as _math
+    bpy.ops.object.mode_set(mode="OBJECT")
+    bpy.ops.mesh.primitive_cylinder_add(radius=1.5, depth=4.0, vertices=48,
+                                        location=(0.0, 30.0, 0.0))
+    fobj = bpy.context.active_object
+    bpy.ops.object.mode_set(mode="EDIT")
+    fbm = bmesh.from_edit_mesh(fobj.data)
+    fbm.faces.ensure_lookup_table()
+    for f in fbm.faces:
+        c = f.calc_center_median()                    # local coords (origin-centred)
+        ang = _math.atan2(c.y, c.x)                   # face angle about the cylinder axis
+        f.select_set(len(f.verts) == 4 and -0.05 <= ang <= _math.pi / 2 + 0.05)
+    bmesh.update_edit_mesh(fobj.data)
+    settings.primitive_type = "FILLET"
+    settings.segment_regions = False
+    if bpy.ops.reverse.fit_selection() != {"FINISHED"}:
+        fail("fillet fit failed")
+    bpy.ops.object.mode_set(mode="OBJECT")
+    ffeat = bpy.context.scene.reverse.features[-1]
+    fco = bpy.data.objects.get(ffeat.object_name)
+    span = _math.degrees(fco["reverse"]["u_max"] - fco["reverse"]["u_min"])
+    if ffeat.kind != "FILLET" or abs(fco["reverse"]["radius"] - 1.5) > 1e-2 or not (70 < span < 110):
+        fail(f"fillet fit wrong: {ffeat.kind} r={fco['reverse']['radius']:.3f} span={span:.1f}°")
+    print(f"[ok] fillet fit: r={fco['reverse']['radius']:.3f} span={span:.0f}° ({ffeat.summary})")
+    settings.primitive_type = "AUTO"
+
     # Torus: whole-mesh fit through the same pipeline.
     bpy.ops.object.mode_set(mode="OBJECT")
     bpy.ops.mesh.primitive_torus_add(major_radius=5.0, minor_radius=1.2,

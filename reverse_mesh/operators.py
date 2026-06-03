@@ -18,8 +18,8 @@ from mathutils import Matrix, Vector
 
 from . import build, occ_export, overlay, pmi_export, step_export
 from .fitting import (
-    FITTERS, Region, classify_arrangement, fit_auto, fit_robust, match_cylinders,
-    signed_distances, snap_result, summarize,
+    FITTERS, Region, classify_arrangement, fit_auto, fit_fillet, fit_robust,
+    match_cylinders, signed_distances, snap_result, summarize,
 )
 from .fitting.common import deviation_color
 
@@ -153,7 +153,9 @@ class REVERSE_OT_fit_selection(Operator):
     def _fit_region(self, region, settings):
         kind = settings.primitive_type
         runner_up = ""
-        if kind == "AUTO":
+        if kind == "FILLET":
+            result = fit_fillet(region)
+        elif kind == "AUTO":
             result, cands = fit_auto(region, return_candidates=True)
             runner_up = self._format_candidates(cands)
             if result is not None and settings.use_ransac:
@@ -648,6 +650,8 @@ _PARAM_KINDS = {
     "SPHERE": {"points": ["center"], "dirs": [], "lengths": ["radius"]},
     "TORUS": {"points": ["center"], "dirs": ["axis"],
               "lengths": ["major_radius", "minor_radius"]},
+    "FILLET": {"points": ["base"], "dirs": ["axis", "ref"],
+               "lengths": ["radius", "height"]},
 }
 
 
@@ -695,6 +699,9 @@ def _feature_from_object(obj, user_scale):
             params[key] = float(data[key]) * obj_scale * s
     if "half_angle" in data.keys():
         params["half_angle"] = float(data["half_angle"])
+    for key in ("u_min", "u_max"):          # fillet arc angles — invariant under the frame
+        if key in data.keys():
+            params[key] = float(data[key])
     for key in _METADATA_KEYS:
         if key in data.keys():
             params[key] = data[key]

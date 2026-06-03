@@ -21,6 +21,7 @@ from fitting import (  # noqa: E402
     fit_box,
     fit_cone,
     fit_cylinder,
+    fit_fillet,
     fit_plane,
     fit_robust,
     fit_sphere,
@@ -87,6 +88,17 @@ def _sample_torus(big_r=5.0, r=1.5, n_major=64, n_minor=24, seed=4):
     normals = np.column_stack([np.cos(vv) * np.cos(uu), np.cos(vv) * np.sin(uu), np.sin(vv)])
     center = np.array([2.0, -1.0, 0.5])
     return pts + center, normals
+
+
+def _sample_fillet(r=1.5, span_deg=90.0, h=6.0, n=600, seed=7):
+    # A quarter-cylinder strip: arc 0..span around +Z axis, radius r.
+    rng = np.random.default_rng(seed)
+    span = math.radians(span_deg)
+    theta = rng.uniform(0.0, span, n)              # arc, not a full circle
+    z = rng.uniform(0, h, n)
+    pts = np.column_stack([r * np.cos(theta), r * np.sin(theta), z])
+    normals = np.column_stack([np.cos(theta), np.sin(theta), np.zeros(n)])
+    return pts, normals
 
 
 def _sample_box(hx=2.0, hy=3.0, hz=4.0, seed=5, rot=True):
@@ -241,6 +253,19 @@ def main():
     results.append(_check("robust rejects outliers",
                           robust is not None and err_robust < 0.05 and err_robust < err_plain,
                           f"plain r={plain.params['radius']:.3f} robust r={robust.params['radius']:.3f}"))
+
+    # Fillet (#5): a 90° quarter-cylinder strip → radius + arc span recovered.
+    pts, nrm = _sample_fillet(r=1.5, span_deg=90.0)
+    r = fit_fillet(_region(pts, nrm))
+    span_deg = math.degrees(r.params["u_max"] - r.params["u_min"]) if r else 0.0
+    results.append(_check("fillet edge", r is not None and r.rms < 1e-6
+                          and abs(r.params["radius"] - 1.5) < 1e-3
+                          and abs(span_deg - 90.0) < 8.0,
+                          f"r={r.params['radius']:.4f} span={span_deg:.1f}° rms={r.rms:.2e}"
+                          if r else "no fit"))
+    # A near-full ring is a cylinder, not a fillet → declined.
+    pts, nrm = _sample_cylinder()
+    results.append(_check("fillet declines full ring", fit_fillet(_region(pts, nrm)) is None))
 
     # Pattern propagation (#8): 6 holes on a bolt circle, plus two decoys.
     bolt_r = 5.0
