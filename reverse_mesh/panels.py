@@ -120,6 +120,8 @@ class REVERSE_PT_features(Panel):
             role_txt = f"{role} · {item.cut_mode.title()}" if item.operation == "SUBTRACT" else role
             box.label(text=f"Role: {role_txt}",
                       icon="REMOVE" if item.operation == "SUBTRACT" else "ADD")
+            if item.runner_up:
+                box.label(text=f"Auto: {item.runner_up}", icon="SHADERFX")
 
         box = layout.box()
         box.label(text="Export", icon="EXPORT")

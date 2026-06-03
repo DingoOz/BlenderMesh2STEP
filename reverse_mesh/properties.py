@@ -35,6 +35,7 @@ class ReverseFeature(PropertyGroup):
     object_name: StringProperty(name="Object")
     operation: StringProperty(name="Operation", default="ADD")
     cut_mode: StringProperty(name="Cut mode", default="THROUGH")
+    runner_up: StringProperty(name="Runner-ups")   # AUTO tie-break, e.g. "CYLINDER 0% | SPHERE 0.4%"
 
 
 class ReverseSettings(PropertyGroup):

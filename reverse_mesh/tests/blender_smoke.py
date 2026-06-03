@@ -91,9 +91,13 @@ def main():
     # AUTO path should also identify the cylinder.
     settings.primitive_type = "AUTO"
     bpy.ops.reverse.fit_selection()
-    if bpy.context.scene.reverse.features[-1].kind != "CYLINDER":
+    autofeat = bpy.context.scene.reverse.features[-1]
+    if autofeat.kind != "CYLINDER":
         fail("AUTO did not detect cylinder")
-    print("[ok] AUTO detected CYLINDER")
+    # Fit confidence (#2): AUTO records a winner-first runner-up summary.
+    if not autofeat.runner_up.startswith("CYLINDER") or "|" not in autofeat.runner_up:
+        fail(f"runner-up summary missing/malformed: '{autofeat.runner_up}'")
+    print(f"[ok] AUTO detected CYLINDER · confidence: {autofeat.runner_up}")
 
     # Dimension snapping (#3): with snap on, the r≈2 fit must store exactly 2.0.
     settings.primitive_type = "CYLINDER"
