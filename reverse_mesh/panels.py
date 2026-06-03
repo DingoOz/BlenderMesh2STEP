@@ -138,6 +138,14 @@ class REVERSE_PT_features(Panel):
                 box.label(text=f"Auto: {item.runner_up}", icon="SHADERFX")
             if item.kind in {"CYLINDER", "CONE"}:
                 box.prop(item, "thread_spec", icon="MOD_SCREW")
+            if item.kind == "CYLINDER" and item.operation == "SUBTRACT":
+                box.prop(item, "hole_preset")
+                if item.hole_preset == "COUNTERBORE":
+                    box.prop(item, "cbore_radius")
+                    box.prop(item, "cbore_depth")
+                elif item.hole_preset == "COUNTERSINK":
+                    box.prop(item, "cbore_radius", text="Countersink radius")
+                    box.prop(item, "csink_angle")
 
         box = layout.box()
         box.label(text="Export", icon="EXPORT")

@@ -125,6 +125,31 @@ def main():
     except OSError:
         pass
 
+    # Counterbore (#6): a through hole (r1) with a wider flat recess (r1.5, depth1)
+    # at the top. Volume = 64 − π·1²·4 (bore) − π·(1.5²−1²)·1 (counterbore ring).
+    cbore = [
+        {"kind": "BOX", "op": "ADD", "name": "base", "params": {
+            "center": (0, 0, 0), "ax": (1, 0, 0), "ay": (0, 1, 0), "az": (0, 0, 1),
+            "hx": 2.0, "hy": 2.0, "hz": 2.0}},
+        {"kind": "CYLINDER", "op": "SUBTRACT", "name": "hole", "params": {
+            "base": (0, 0, 0), "axis": (0, 0, 1), "radius": 1.0, "height": 4.0,
+            "hole_preset": "COUNTERBORE", "cbore_radius": 1.5, "cbore_depth": 1.0}},
+    ]
+    out_cb = os.path.join(os.path.dirname(__file__), "occ_cbore.step")
+    occ_export.export(cbore, out_cb, unit="MM", merge=False, overshoot=0.05)
+    rcb = STEPControl_Reader(); rcb.ReadFile(out_cb); rcb.TransferRoots(); shcb = rcb.OneShape()
+    prcb = GProp_GProps(); BRepGProp.VolumeProperties_s(shcb, prcb); vcb = prcb.Mass()
+    expected_cb = 64.0 - math.pi * 4.0 - math.pi * (1.5 ** 2 - 1.0 ** 2) * 1.0
+    valid_cb = BRepCheck_Analyzer(shcb).IsValid()
+    print(f"[info] counterbore: volume={vcb:.3f} expected={expected_cb:.3f} valid={valid_cb}")
+    if not valid_cb or abs(vcb - expected_cb) > 0.5:
+        fail(f"counterbore volume wrong (vol={vcb:.3f}, expected {expected_cb:.3f})")
+    print("[ok] counterbore: through hole + flat recess, volume correct")
+    try:
+        os.remove(out_cb)
+    except OSError:
+        pass
+
     # Coplanar ends: a cutter whose height exactly spans the box (z -2..2). The
     # overshoot must still open a clean through-hole on the coplanar top/bottom.
     from OCP.TopAbs import TopAbs_FACE

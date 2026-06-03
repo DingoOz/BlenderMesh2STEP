@@ -593,6 +593,12 @@ def _feature_from_object(obj, user_scale):
     for key in _METADATA_KEYS:
         if key in data.keys():
             params[key] = data[key]
+    # Counterbore / countersink recess params: radius/depth scale, angle does not.
+    for key in ("cbore_radius", "cbore_depth"):
+        if key in data.keys():
+            params[key] = float(data[key]) * obj_scale * s
+    if "csink_angle" in data.keys():
+        params["csink_angle"] = float(data["csink_angle"])
 
     rgb = tuple(obj.color[:3])
     color = rgb if any(abs(c - 1.0) > 1e-4 for c in rgb) else None
