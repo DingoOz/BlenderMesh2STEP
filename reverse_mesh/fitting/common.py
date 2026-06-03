@@ -167,6 +167,18 @@ def snap_value(x, step=None, preferred=None, rel_tol=SNAP_REL_TOLERANCE):
     return x, False
 
 
+def deviation_color(t, alpha=0.6):
+    """Map a normalised deviation ``t`` (0 = on-surface) to a green→yellow→red RGBA.
+
+    ``t`` is clamped to ``[0, 1]``; 0 is green (a face that fits), 1 is red (a face
+    that deviates by the full tolerance). Used by the fit-quality heatmap overlay.
+    """
+    t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else float(t)
+    if t < 0.5:
+        return (2.0 * t, 1.0, 0.0, alpha)          # green → yellow
+    return (1.0, 2.0 * (1.0 - t), 0.0, alpha)      # yellow → red
+
+
 def _unit(v: np.ndarray) -> np.ndarray:
     n = float(np.linalg.norm(v))
     return v / n if n > 1e-12 else v

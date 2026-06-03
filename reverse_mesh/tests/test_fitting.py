@@ -27,7 +27,7 @@ from fitting import (  # noqa: E402
     signed_distances,
     snap_result,
 )
-from fitting.common import snap_value  # noqa: E402
+from fitting.common import deviation_color, snap_value  # noqa: E402
 
 
 def _region(pts, nrm):
@@ -214,6 +214,17 @@ def main():
     _, ch = snap_result(r, step=0.1)
     results.append(_check("snap_result cylinder", ch and abs(r.params['radius'] - 2.0) < 1e-9
                           and "r=2 " in (r.summary + " "), f"r={r.params['radius']} '{r.summary}'"))
+
+    # Heatmap colour ramp (#1): green at 0, red at 1, clamped, yellow mid.
+    g = deviation_color(0.0)
+    r = deviation_color(1.0)
+    y = deviation_color(0.5)
+    over = deviation_color(5.0)
+    ok_cmap = (g[0] < 0.01 and g[1] > 0.99            # green
+               and r[0] > 0.99 and r[1] < 0.01        # red
+               and y[0] > 0.99 and y[1] > 0.99        # yellow midpoint
+               and over == r)                          # clamped above 1
+    results.append(_check("deviation colour ramp", ok_cmap, f"g={g[:3]} r={r[:3]}"))
 
     print(f"\n{sum(results)}/{len(results)} passed")
     sys.exit(0 if all(results) else 1)

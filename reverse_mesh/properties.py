@@ -25,6 +25,14 @@ PRIMITIVE_ITEMS = [
 ]
 
 
+def _on_heatmap_toggle(self, context):
+    # Clear any drawn heatmap when the user switches it off (it rebuilds on the
+    # next fit). Imported lazily to avoid a module-load cycle.
+    from . import overlay
+    if not self.show_heatmap:
+        overlay.clear_prefix("heatmap:")
+
+
 class ReverseFeature(PropertyGroup):
     """One fitted primitive, shown in the session feature list."""
 
@@ -121,6 +129,16 @@ class ReverseSettings(PropertyGroup):
         min=1e-6,
         max=1e6,
         precision=4,
+    )
+    show_heatmap: BoolProperty(
+        name="Fit-quality heatmap",
+        description=(
+            "After fitting, colour the selected faces by how far each deviates "
+            "from the fitted surface (green = exact, red = off by the tolerance) "
+            "so you can spot faces that don't belong to the primitive"
+        ),
+        default=False,
+        update=_on_heatmap_toggle,
     )
     segments: IntProperty(
         name="Segments",

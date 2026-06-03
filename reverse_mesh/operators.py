@@ -16,8 +16,9 @@ from bpy.types import Operator
 from bpy_extras.io_utils import ExportHelper
 from mathutils import Matrix, Vector
 
-from . import build, occ_export, step_export
-from .fitting import FITTERS, Region, fit_auto, snap_result, summarize
+from . import build, occ_export, overlay, step_export
+from .fitting import FITTERS, Region, fit_auto, signed_distances, snap_result, summarize
+from .fitting.common import deviation_color
 
 
 def occt_lib_dir(create=False):
@@ -52,6 +53,13 @@ def _region_from_faces(faces, mw, nmat):
 
 def _selected_faces(obj):
     return [f for f in bmesh.from_edit_mesh(obj.data).faces if f.select]
+
+
+def _face_tris_world(face, mw):
+    """Fan-triangulate a bmesh face into world-space (x, y, z) vertex triples."""
+    vs = [mw @ v.co for v in face.verts]
+    return [(tuple(vs[0]), tuple(vs[i]), tuple(vs[i + 1]))
+            for i in range(1, len(vs) - 1)]
 
 
 def _grow_region(seed, pool, angle_threshold_rad, visited=None):
@@ -127,6 +135,22 @@ class REVERSE_OT_fit_selection(Operator):
             snap_result(result, step=step)   # conservative snap tolerance (own default)
         return result, runner_up
 
+    @staticmethod
+    def _push_heatmap(settings, region, result, geo, idx):
+        """Colour each selected face by its deviation from the fitted surface."""
+        dev = np.abs(signed_distances(result, region.face_points))
+        scale = result.params.get("_scale", 1.0) or 1.0
+        denom = max(settings.tolerance * scale, 1e-12)   # red at one tolerance off
+        coords, colors = [], []
+        for face_tris, d in zip(geo, dev):
+            col = deviation_color(d / denom)
+            for tri in face_tris:
+                for v in tri:
+                    coords.append(v)
+                    colors.append(col)
+        if coords:
+            overlay.set_tris(f"heatmap:{idx}", coords, colors)
+
     def _record(self, context, settings, result, runner_up, obj, build_objects,
                 source_faces=""):
         """Build the clean object (optional) and append a feature entry."""
@@ -169,8 +193,11 @@ class REVERSE_OT_fit_selection(Operator):
 
         # Capture geometry AND the source face indices now, while the edit-mode
         # bmesh is still valid (we leave Edit Mode below to build clean objects).
+        # cluster_geo holds each face's world-space fan triangles (for the heatmap),
+        # in the same face order as the region's face_points.
         regions = [_region_from_faces(c, mw, nmat) for c in clusters]
         cluster_faces = [",".join(str(f.index) for f in c) for c in clusters]
+        cluster_geo = [[_face_tris_world(f, mw) for f in c] for c in clusters]
 
         # In single-fit mode, warn if the selection clearly spans several surfaces.
         if not settings.segment_regions:
@@ -187,8 +214,11 @@ class REVERSE_OT_fit_selection(Operator):
         if settings.create_object:
             bpy.ops.object.mode_set(mode="OBJECT")
 
+        # Refresh the deviation heatmap: drop any previous overlay first.
+        overlay.clear_prefix("heatmap:")
+
         results = []
-        for region, src_faces in zip(regions, cluster_faces):
+        for region, src_faces, geo in zip(regions, cluster_faces, cluster_geo):
             if len(region.points) < 3:
                 continue
             result, runner_up = self._fit_region(region, settings)
@@ -196,6 +226,8 @@ class REVERSE_OT_fit_selection(Operator):
                 self._record(context, settings, result, runner_up, obj,
                              settings.create_object, source_faces=src_faces)
                 results.append(result)
+                if settings.show_heatmap:
+                    self._push_heatmap(settings, region, result, geo, len(results) - 1)
 
         if settings.create_object:
             bpy.ops.object.mode_set(mode=prev_mode)
