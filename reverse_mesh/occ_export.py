@@ -51,6 +51,49 @@ def _imp(module, *names):
     raise ImportError(f"Cannot import {names} from {module}: {last}")
 
 
+class ExportReport(str):
+    """The export status string, carrying structured validation data.
+
+    Subclasses ``str`` so every existing caller that logs or substring-tests the
+    status keeps working, while :mod:`reverse_mesh.operators` can read the
+    per-solid ``volumes``/validity to fill the validation report panel.
+    """
+
+    def __new__(cls, summary, *, solids=(), free_edges=None,
+                watertight=None, valid=None, backend=""):
+        obj = super().__new__(cls, summary)
+        obj.solids = list(solids)          # [{"index", "volume", "valid"}]
+        obj.free_edges = free_edges        # int, or None if no watertight pass
+        obj.watertight = watertight        # True/False/None
+        obj.valid = valid                  # whole-shape BRepCheck validity
+        obj.backend = backend
+        return obj
+
+
+def _solid_report(shape):
+    """Per-solid (volume, validity) for every TopAbs_SOLID in ``shape``."""
+    (TopExp_Explorer,) = _imp("TopExp", "TopExp_Explorer")
+    (TopAbs_SOLID,) = _imp("TopAbs", "TopAbs_SOLID")
+    (GProp_GProps,) = _imp("GProp", "GProp_GProps")
+    (BRepGProp,) = _imp("BRepGProp", "BRepGProp")
+    (BRepCheck_Analyzer,) = _imp("BRepCheck", "BRepCheck_Analyzer")
+    out = []
+    exp = TopExp_Explorer(shape, TopAbs_SOLID)
+    i = 0
+    while exp.More():
+        s = exp.Current()
+        props = GProp_GProps()
+        BRepGProp.VolumeProperties_s(s, props)
+        try:
+            valid = bool(BRepCheck_Analyzer(s).IsValid())
+        except Exception:
+            valid = False
+        out.append({"index": i, "volume": float(props.Mass()), "valid": valid})
+        i += 1
+        exp.Next()
+    return out
+
+
 def _grow_cutter(kind, p, frac, ends="BOTH"):
     """Extend a subtractive cutter along its axis so its end(s) overshoot the body.
 
@@ -271,10 +314,13 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
     for part in parts:
         builder.Add(compound, part)
 
+    free_edges = None
+    watertight_ok = None
     if watertight:
         try:
             healed, n_solids, free_edges = _make_watertight(compound, sew_tol)
             compound = healed
+            watertight_ok = free_edges == 0
             if free_edges == 0:
                 note += f" — watertight ({n_solids} closed solid(s))"
             else:
@@ -293,7 +339,18 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
     if writer.Write(filepath) != IFSelect_RetDone:
         raise RuntimeError("STEPControl_Writer.Write failed")
 
-    return f"{note} + {len(faces)} face(s) via {backend_name()}"
+    # Validation report: per-solid volume + validity, surfaced to the user.
+    try:
+        solids = _solid_report(compound)
+        (BRepCheck_Analyzer,) = _imp("BRepCheck", "BRepCheck_Analyzer")
+        all_valid = bool(BRepCheck_Analyzer(compound).IsValid())
+    except Exception:
+        solids, all_valid = [], None
+
+    summary = f"{note} + {len(faces)} face(s) via {backend_name()}"
+    return ExportReport(summary, solids=solids, free_edges=free_edges,
+                        watertight=watertight_ok, valid=all_valid,
+                        backend=backend_name())
 
 
 def _make_shape(kind, p, gp_Pnt, gp_Dir, gp_Ax3, gp_Pln,

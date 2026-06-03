@@ -6,6 +6,7 @@ sys.path:
     blender --background --python reverse_mesh/tests/test_occ_export.py
 """
 
+import math
 import os
 import sys
 
@@ -35,6 +36,19 @@ def main():
     out = os.path.join(os.path.dirname(__file__), "occ_sample.step")
     info = occ_export.export(feats, out, unit="MM", merge=False)
     print("[info]", info)
+
+    # Validation report (#10): structured per-solid volume + validity surfaced.
+    if not hasattr(info, "solids") or len(info.solids) != 3:
+        fail(f"export report missing per-solid data: {getattr(info, 'solids', None)}")
+    if not all(s["valid"] for s in info.solids):
+        fail(f"report flagged invalid solids: {info.solids}")
+    sph = next((s for s in info.solids if abs(s["volume"] - (4.0 / 3.0 * math.pi * 2.5 ** 3)) < 0.5), None)
+    if sph is None:
+        fail(f"sphere volume not reported correctly: {[s['volume'] for s in info.solids]}")
+    if info.valid is not True:
+        fail(f"overall validity not True: {info.valid}")
+    print(f"[ok] validation report: {len(info.solids)} solids, volumes "
+          f"{[round(s['volume'], 2) for s in info.solids]}, all valid")
 
     head = open(out).read(2000)
     if "10303 442" not in head:                 # AP242 schema identifier
@@ -100,7 +114,6 @@ def main():
     props = GProp_GProps()
     BRepGProp.VolumeProperties_s(sh3, props)
     vol = props.Mass()
-    import math
     expected = 64.0 - math.pi * 1.0 ** 2 * 4.0      # box minus the drilled cylinder
     ok = (n3 == 1 and BRepCheck_Analyzer(sh3).IsValid() and abs(vol - expected) < 0.5)
     print(f"[info] cut: solids={n3} volume={vol:.3f} expected={expected:.3f}")

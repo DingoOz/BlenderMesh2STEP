@@ -141,6 +141,10 @@ class ReverseSettings(PropertyGroup):
     features: CollectionProperty(type=ReverseFeature)
     active_feature: IntProperty(name="Active feature", default=0)
 
+    # Last export's validation report (one line per solid), filled by the OCCT
+    # path; shown in the Validation panel. Empty until the first export.
+    last_report: StringProperty(name="Last export report", default="")
+
 
 classes = (ReverseFeature, ReverseSettings)
 

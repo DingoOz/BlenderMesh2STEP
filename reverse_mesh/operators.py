@@ -561,6 +561,22 @@ def _feature_from_object(obj, user_scale):
             "op": op, "cut": cut}
 
 
+def _format_report(info):
+    """Build the human-readable validation report from an occ_export ExportReport."""
+    lines = []
+    for s in getattr(info, "solids", []):
+        flag = "valid" if s["valid"] else "INVALID"
+        lines.append(f"Solid {s['index']}: vol {s['volume']:.4g} · {flag}")
+    fe = getattr(info, "free_edges", None)
+    if fe:
+        lines.append(f"{fe} open edge(s) — NOT watertight")
+    elif getattr(info, "watertight", None):
+        lines.append("watertight ✓")
+    if getattr(info, "valid", None) is False:
+        lines.append("overall: INVALID topology")
+    return "\n".join(lines) if lines else str(info)
+
+
 class REVERSE_OT_export_step(Operator, ExportHelper):
     """Export fitted analytic primitives as an AP242 STEP assembly"""
 
@@ -656,6 +672,7 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
                                          overshoot=self.cutter_overshoot,
                                          watertight=self.make_watertight,
                                          sew_tol=self.sew_tolerance)
+                context.scene.reverse.last_report = _format_report(info)
                 self.report({"INFO"}, f"Exported via OCCT: {info}")
                 return {"FINISHED"}
             except Exception as exc:
@@ -671,6 +688,9 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
         with open(self.filepath, "w", encoding="ascii", errors="replace") as fp:
             fp.write(text)
 
+        context.scene.reverse.last_report = (
+            "Validation (volumes / watertightness) requires the OCCT kernel.\n"
+            "Install it from the panel to get a per-solid report.")
         self.report({"INFO"}, f"Exported {len(features)} primitives → {os.path.basename(self.filepath)}")
         return {"FINISHED"}
 
