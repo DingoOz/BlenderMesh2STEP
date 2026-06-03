@@ -321,6 +321,34 @@ def main():
         except OSError:
             pass
 
+    # Semantic PMI (#11b): a PMI-embedded pure-Python STEP must still re-read and
+    # its geometry import cleanly (the dimensions ride alongside, not breaking it).
+    pmi_feats = [
+        {"kind": "CYLINDER", "name": "c", "params": {
+            "base": (0, 0, 0), "axis": (0, 0, 1), "radius": 2.0, "height": 6.0}},
+        {"kind": "SPHERE", "name": "s", "params": {"center": (10, 0, 0), "radius": 2.5}},
+    ]
+    out_pmi = os.path.join(os.path.dirname(__file__), "py_pmi.step")
+    with open(out_pmi, "w") as f:
+        f.write(step_export.build_step(pmi_feats, unit="MM", product_name="PMI", pmi=True))
+    rpmi = STEPControl_Reader()
+    if rpmi.ReadFile(out_pmi) != IFSelect_RetDone:
+        fail("PMI-embedded STEP did not re-read")
+    rpmi.TransferRoots(); shpmi = rpmi.OneShape()
+    npmi = 0
+    e = TopExp_Explorer(shpmi, TopAbs_SOLID)
+    while e.More():
+        npmi += 1; e.Next()
+    if shpmi.IsNull() or npmi != 2:
+        fail(f"PMI embedding broke geometry import (solids={npmi})")
+    if "DIMENSIONAL_SIZE(" not in open(out_pmi).read():
+        fail("semantic dimensions missing from PMI STEP")
+    print(f"[ok] semantic PMI: dimensions embedded, geometry still imports ({npmi} solids)")
+    try:
+        os.remove(out_pmi)
+    except OSError:
+        pass
+
     for f in (out, out2):
         try:
             os.remove(f)

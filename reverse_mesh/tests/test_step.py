@@ -125,6 +125,18 @@ def main():
     check("pmi has axis angles",
           any(r["type"] == "axis_angle_deg" for r in pmi["relationships"]))
 
+    # Semantic AP242 PMI (#11b): DIMENSIONAL_SIZE entities, refs still resolve.
+    ptext = se.build_step(_features(), unit="MM", product_name="PMI", pmi=True)
+    pdefs = set(re.findall(r"^#(\d+)=", ptext, re.MULTILINE))
+    prefs = set(re.findall(r"#(\d+)", ptext.split("DATA;", 1)[1]))
+    check("semantic pmi entities", "DIMENSIONAL_SIZE(" in ptext
+          and "SHAPE_DIMENSION_REPRESENTATION(" in ptext
+          and "MEASURE_REPRESENTATION_ITEM(" in ptext)
+    check("semantic pmi no dangling refs", not (prefs - pdefs),
+          f"missing {sorted(prefs - pdefs)[:5]}")
+    n_dims = ptext.count("DIMENSIONAL_SIZE(")
+    check("semantic pmi dimension count", n_dims >= 5, f"got {n_dims}")  # cyl/cone/sph/torus/fillet
+
     print(f"\n{'ALL STEP CHECKS PASSED' if ok else 'STEP CHECKS FAILED'}")
     sys.exit(0 if ok else 1)
 
