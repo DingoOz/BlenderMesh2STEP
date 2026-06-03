@@ -67,6 +67,13 @@ class REVERSE_PT_main(Panel):
         sub.prop(settings, "segments")
         box.prop(settings, "tolerance")
 
+        box.prop(settings, "snap_enabled")
+        snap = box.column(align=True)
+        snap.enabled = settings.snap_enabled
+        snap.prop(settings, "snap_preset", text="Snap to")
+        if settings.snap_preset == "CUSTOM":
+            snap.prop(settings, "snap_step")
+
 
 class REVERSE_PT_features(Panel):
     bl_label = "Fitted Features"

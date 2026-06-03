@@ -13,6 +13,8 @@ from .primitives import (
     fit_torus,
     predicted_normals,
     signed_distances,
+    snap_result,
+    summarize,
 )
 
 __all__ = [
@@ -28,4 +30,6 @@ __all__ = [
     "fit_torus",
     "predicted_normals",
     "signed_distances",
+    "snap_result",
+    "summarize",
 ]

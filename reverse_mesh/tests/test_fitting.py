@@ -25,7 +25,9 @@ from fitting import (  # noqa: E402
     fit_sphere,
     fit_torus,
     signed_distances,
+    snap_result,
 )
+from fitting.common import snap_value  # noqa: E402
 
 
 def _region(pts, nrm):
@@ -197,6 +199,21 @@ def main():
                        for i in range(1, len(cands) - 1)))  # rest ascending
     results.append(_check("auto candidates", ok_cand,
                           f"n={len(cands)} top={cands[0]['kind'] if cands else None}"))
+
+    # Dimension snapping (#3): close values snap, distant ones are left alone.
+    v, ch = snap_value(19.98, step=1.0)               # 0.1% off → snap
+    results.append(_check("snap close→nice", ch and abs(v - 20.0) < 1e-9, f"got {v}"))
+    v, ch = snap_value(17.3, step=1.0)                # 1.7% off → keep
+    results.append(_check("snap keeps genuine", (not ch) and abs(v - 17.3) < 1e-9, f"got {v}"))
+    v, ch = snap_value(2.013, preferred=[1.0, 2.0, 2.5, 5.0])   # 0.65% off → snap
+    results.append(_check("snap to preferred", ch and abs(v - 2.0) < 1e-9, f"got {v}"))
+
+    # snap_result rounds a near-2.0 fitted radius and updates the summary.
+    pts, nrm = _sample_cylinder(r=2.013, h=10.0)
+    r = fit_cylinder(_region(pts, nrm))
+    _, ch = snap_result(r, step=0.1)
+    results.append(_check("snap_result cylinder", ch and abs(r.params['radius'] - 2.0) < 1e-9
+                          and "r=2 " in (r.summary + " "), f"r={r.params['radius']} '{r.summary}'"))
 
     print(f"\n{sum(results)}/{len(results)} passed")
     sys.exit(0 if all(results) else 1)
