@@ -246,9 +246,20 @@ def main():
     # STEP export of everything fitted so far.
     out = os.path.join(os.path.dirname(__file__), "smoke_export.step")
     n_reverse = sum(1 for o in bpy.context.scene.objects if "reverse" in o)
-    res = bpy.ops.reverse.export_step(filepath=out, unit="MM")
+    res = bpy.ops.reverse.export_step(filepath=out, unit="MM", write_pmi_sidecar=True)
     if res != {"FINISHED"}:
         fail(f"STEP export returned {res}")
+    # PMI sidecar (#11a) must be written alongside the STEP.
+    pmi_json = out[:-len(".step")] + ".pmi.json"
+    if not os.path.exists(pmi_json) or os.path.getsize(pmi_json) < 50:
+        fail("PMI sidecar .pmi.json missing or empty")
+    import json as _json
+    with open(pmi_json) as f:
+        pmi = _json.load(f)
+    if not pmi.get("features"):
+        fail("PMI sidecar has no features")
+    print(f"[ok] PMI sidecar written ({len(pmi['features'])} features, "
+          f"{len(pmi.get('relationships', []))} relationships)")
     if not os.path.exists(out) or os.path.getsize(out) < 500:
         fail("STEP file missing or too small")
     with open(out) as f:

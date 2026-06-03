@@ -16,7 +16,7 @@ from bpy.types import Operator
 from bpy_extras.io_utils import ExportHelper
 from mathutils import Matrix, Vector
 
-from . import build, occ_export, overlay, step_export
+from . import build, occ_export, overlay, pmi_export, step_export
 from .fitting import (
     FITTERS, Region, fit_auto, fit_robust, signed_distances, snap_result, summarize,
 )
@@ -680,6 +680,15 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
         description="Export only selected Reverse objects (otherwise all in the scene)",
         default=False,
     )
+    write_pmi_sidecar: BoolProperty(
+        name="Write PMI sidecar",
+        description=(
+            "Also write .pmi.json and .pmi.csv next to the STEP with each feature's "
+            "dimensions (radii, diameters, lengths, angles, threads) and pairwise "
+            "relationships (axis angles, hole spacing)"
+        ),
+        default=False,
+    )
 
     @classmethod
     def poll(cls, context):
@@ -699,6 +708,13 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
             return {"CANCELLED"}
 
         name = os.path.splitext(os.path.basename(self.filepath))[0] or "Reverse"
+
+        if self.write_pmi_sidecar:
+            try:
+                jp, cp = pmi_export.write_sidecar(features, self.filepath)
+                self.report({"INFO"}, f"PMI sidecar → {os.path.basename(jp)}, {os.path.basename(cp)}")
+            except Exception as exc:
+                self.report({"WARNING"}, f"PMI sidecar failed: {exc}")
 
         ensure_occt_on_path()
         use_occt = self.backend == "OCCT" or (self.backend == "AUTO" and occ_export.is_available())
