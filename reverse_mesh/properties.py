@@ -82,6 +82,16 @@ class ReverseSettings(PropertyGroup):
         min=1.0,
         max=180.0,
     )
+    select_similar_angle: FloatProperty(
+        name="Similar crease angle (°)",
+        description=(
+            "Select Similar grows across edges whose face-normal angle is below "
+            "this — higher follows more curvature, lower stops at gentler creases"
+        ),
+        default=20.0,
+        min=1.0,
+        max=180.0,
+    )
     segments: IntProperty(
         name="Segments",
         description="Tessellation resolution of generated round primitives",

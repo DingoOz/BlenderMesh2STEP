@@ -53,6 +53,30 @@ def _selected_faces(obj):
     return [f for f in bmesh.from_edit_mesh(obj.data).faces if f.select]
 
 
+def _grow_region(seed, pool, angle_threshold_rad, visited=None):
+    """Flood-fill a smooth-connected region of faces outward from ``seed``.
+
+    Crosses an edge only to a face that is in ``pool`` and whose normal is within
+    ``angle_threshold_rad`` of the current face's. ``visited`` (a set) is updated
+    in place, so a caller can segment a whole pool by reusing it across seeds.
+    """
+    if visited is None:
+        visited = set()
+    region = [seed]
+    visited.add(seed)
+    stack = [seed]
+    while stack:
+        f = stack.pop()
+        for edge in f.edges:
+            for nf in edge.link_faces:
+                if nf in pool and nf not in visited:
+                    if f.normal.angle(nf.normal, math.pi) <= angle_threshold_rad:
+                        visited.add(nf)
+                        region.append(nf)
+                        stack.append(nf)
+    return region
+
+
 def _segment_faces(faces, angle_threshold_rad):
     """Group selected faces into smooth-connected regions.
 
@@ -66,19 +90,7 @@ def _segment_faces(faces, angle_threshold_rad):
     for seed in faces:
         if seed in visited:
             continue
-        region = [seed]
-        visited.add(seed)
-        stack = [seed]
-        while stack:
-            f = stack.pop()
-            for edge in f.edges:
-                for nf in edge.link_faces:
-                    if nf in selected and nf not in visited:
-                        if f.normal.angle(nf.normal, math.pi) <= angle_threshold_rad:
-                            visited.add(nf)
-                            region.append(nf)
-                            stack.append(nf)
-        regions.append(region)
+        regions.append(_grow_region(seed, selected, angle_threshold_rad, visited))
     return regions
 
 
@@ -177,6 +189,47 @@ class REVERSE_OT_fit_selection(Operator):
                 kinds[r.kind] = kinds.get(r.kind, 0) + 1
             summary = ", ".join(f"{n}× {k.lower()}" for k, n in sorted(kinds.items()))
             self.report({"INFO"}, f"Fitted {len(results)} regions: {summary}")
+        return {"FINISHED"}
+
+
+class REVERSE_OT_select_similar(Operator):
+    """Grow the selection to the whole surface around the active face
+
+    Flood-fills from the active (or first selected) face across the whole mesh,
+    following gently-curving neighbours and stopping at sharp creases — so one
+    click on a cylinder wall selects the entire wall, but not its end caps.
+    """
+
+    bl_idname = "reverse.select_similar"
+    bl_label = "Select Similar Surface"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and obj.type == "MESH" and obj.mode == "EDIT"
+
+    def execute(self, context):
+        settings = context.scene.reverse
+        obj = context.active_object
+        bm = bmesh.from_edit_mesh(obj.data)
+        bm.faces.ensure_lookup_table()
+
+        seed = bm.faces.active
+        if seed is None or not seed.select:
+            seed = next((f for f in bm.faces if f.select), None)
+        if seed is None:
+            self.report({"WARNING"}, "Select a face to grow the surface from")
+            return {"CANCELLED"}
+
+        pool = set(bm.faces)
+        region = _grow_region(seed, pool, math.radians(settings.select_similar_angle))
+        for f in region:
+            f.select_set(True)        # also selects the face's own verts/edges
+        # NB: don't select_flush(True) — flushing selection *up* would re-select a
+        # cap whose every vertex is shared with the (now-selected) wall quads.
+        bmesh.update_edit_mesh(obj.data)
+        self.report({"INFO"}, f"Selected {len(region)} faces in the surface")
         return {"FINISHED"}
 
 
@@ -528,6 +581,7 @@ def menu_export(self, context):
 
 classes = (
     REVERSE_OT_fit_selection,
+    REVERSE_OT_select_similar,
     REVERSE_OT_clear_features,
     REVERSE_OT_set_operation,
     REVERSE_OT_set_cut_mode,

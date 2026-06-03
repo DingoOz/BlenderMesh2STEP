@@ -48,6 +48,9 @@ class REVERSE_PT_main(Panel):
             box.label(text="Enter Edit Mode and select faces", icon="INFO")
         else:
             layout.operator("reverse.fit_selection", icon="SHADERFX")
+            row = layout.row(align=True)
+            row.operator("reverse.select_similar", icon="FACESEL", text="Select Similar")
+            row.prop(settings, "select_similar_angle", text="")
 
         box = layout.box()
         box.label(text="Segmentation", icon="MOD_EDGESPLIT")

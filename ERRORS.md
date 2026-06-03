@@ -69,3 +69,13 @@
 - **Root cause:** Box acceptance used only point-to-surface distance; it ignored whether the face normals actually align with the box's three axes.
 - **Fix applied:** Reject a box fit unless ≥80% of face normals are within ~10° of one of the three box axes. Cylinders/spheres fail this; real boxes pass.
 - **Prevention rule:** For a multi-face primitive (box), require the *normals* to match its faces, not just that points lie on its surface; a low point residual alone is not sufficient evidence of the shape.
+
+### bmesh select_flush(True) re-selects unwanted faces sharing all verts — 2026-06-03
+
+- **Severity:** Medium
+- **Category:** API Misuse
+- **File(s):** `reverse_mesh/operators.py`
+- **Pattern:** After selecting a set of faces in a bmesh, calling `bm.select_flush(True)` to "finish" the selection. The upward flush selects any face whose vertices are *all* already selected — so selecting a cylinder's wall quads also grabs the end-cap n-gon (its every vertex is a shared rim vertex), even though the cap was deliberately excluded.
+- **Root cause:** `select_flush(True)` propagates selection vert→edge→face (upward); a face fully surrounded by selected geometry becomes selected as a side effect, regardless of the intended face set.
+- **Fix applied:** Dropped the upward flush. `BMFace.select_set(True)` already selects the face's own verts/edges, which is all that's needed; for explicit face sets, never flush selection upward.
+- **Prevention rule:** When you have computed an exact face set, set `face.select_set(True)` per face and do NOT call `select_flush(True)`. Reserve upward flush for genuine vert/edge-driven selections; if you must flush, use `select_flush_mode()` and verify it doesn't capture fully-enclosed faces.

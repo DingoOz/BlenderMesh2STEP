@@ -34,10 +34,27 @@ def main():
     bpy.ops.mesh.primitive_cylinder_add(radius=2.0, depth=6.0, vertices=64)
     obj = bpy.context.active_object
 
-    # Edit mode, select only the side faces (exclude the two n-gon caps).
+    # Edit mode. First check Select Similar (#9): one side quad must grow to the
+    # whole wall (64 side quads) without leaking onto the two n-gon caps.
     bpy.ops.object.mode_set(mode="EDIT")
     bm = bmesh.from_edit_mesh(obj.data)
     bm.faces.ensure_lookup_table()
+    for f in bm.faces:
+        f.select_set(False)
+    seed = next(f for f in bm.faces if len(f.verts) == 4)
+    seed.select_set(True)
+    bm.faces.active = seed
+    bmesh.update_edit_mesh(obj.data)
+    if bpy.ops.reverse.select_similar() != {"FINISHED"}:
+        fail("select_similar operator failed")
+    bm = bmesh.from_edit_mesh(obj.data)
+    bm.faces.ensure_lookup_table()
+    grown = [f for f in bm.faces if f.select]
+    if len(grown) != 64 or any(len(f.verts) != 4 for f in grown):
+        fail(f"select_similar grew to {len(grown)} faces (expected 64 side quads, no caps)")
+    print(f"[ok] select-similar grew one face → {len(grown)} wall faces (caps excluded)")
+
+    # Now select only the side faces (exclude the two n-gon caps) to fit.
     for f in bm.faces:
         f.select_set(len(f.verts) == 4)  # side quads only
     bmesh.update_edit_mesh(obj.data)
