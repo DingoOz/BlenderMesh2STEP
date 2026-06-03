@@ -6,6 +6,9 @@ __pycache__/
 # Build / release artifacts
 /dist/
 
+# Local OCCT test virtualenv (kernel-path tests; not shipped)
+/.occ-venv/
+
 # Test outputs
 *.step
 *.stp
