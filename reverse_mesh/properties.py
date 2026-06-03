@@ -36,6 +36,23 @@ def _on_thread_update(self, context):
         del obj["reverse"]["thread_spec"]
 
 
+def _on_hole_update(self, context):
+    # Mirror counterbore/countersink preset params onto the object for export.
+    obj = bpy.data.objects.get(self.object_name) if self.object_name else None
+    if obj is None or "reverse" not in obj:
+        return
+    rev = obj["reverse"]
+    if self.hole_preset != "NONE":
+        rev["hole_preset"] = self.hole_preset
+        rev["cbore_radius"] = self.cbore_radius
+        rev["cbore_depth"] = self.cbore_depth
+        rev["csink_angle"] = self.csink_angle
+    else:
+        for k in ("hole_preset", "cbore_radius", "cbore_depth", "csink_angle"):
+            if k in rev:
+                del rev[k]
+
+
 def _on_heatmap_toggle(self, context):
     # Clear any drawn heatmap when the user switches it off (it rebuilds on the
     # next fit). Imported lazily to avoid a module-load cycle.
@@ -60,6 +77,23 @@ class ReverseFeature(PropertyGroup):
     thread_spec: StringProperty(                          # e.g. "M8x1.25"; annotates STEP
         name="Thread", description="Thread designation for this hole/shaft (e.g. M8x1.25)",
         update=_on_thread_update)
+    hole_preset: EnumProperty(
+        name="Hole",
+        description="Recess at the open end of a subtractive cylindrical hole (OCCT export)",
+        items=[
+            ("NONE", "Plain", "A plain hole"),
+            ("COUNTERBORE", "Counterbore", "Flat-bottomed wider recess (for a cap screw head)"),
+            ("COUNTERSINK", "Countersink", "Tapered recess (for a flat-head screw)"),
+        ],
+        default="NONE",
+        update=_on_hole_update,
+    )
+    cbore_radius: FloatProperty(name="Recess radius", default=0.0, min=0.0,
+                                update=_on_hole_update)
+    cbore_depth: FloatProperty(name="Counterbore depth", default=0.0, min=0.0,
+                               update=_on_hole_update)
+    csink_angle: FloatProperty(name="Countersink angle (°)", default=90.0, min=1.0, max=179.0,
+                               update=_on_hole_update)
 
 
 class ReverseSettings(PropertyGroup):

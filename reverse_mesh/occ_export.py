@@ -14,6 +14,7 @@ kernel-grade AP242 file. Same feature schema as :func:`step_export.build_step`.
 from __future__ import annotations
 
 import importlib
+import math
 
 from .step_export import _add, _cross, _perp, _scale, _sub, _unit  # geometry helpers
 
@@ -134,6 +135,37 @@ def _grow_cutter(kind, p, frac, ends="BOTH"):
         q["radius2"] = max(0.0, p["radius2"] + slope * g) if grow_high else p["radius2"]
     # Boxes / spheres / tori have no single pair of "ends"; left unchanged.
     return q
+
+
+def _expand_preset(p):
+    """Extra coaxial cutter(s) for a counterbore/countersink hole, or [].
+
+    A preset hole is a base through-cylinder (cut normally) plus a wider recess at
+    its open (+axis) end: a flat-bottomed cylinder for a counterbore, or a tapered
+    cone for a countersink. Returns ``[(kind, params, grow_ends)]`` to subtract in
+    addition to the base hole.
+    """
+    preset = p.get("hole_preset", "NONE")
+    if preset not in ("COUNTERBORE", "COUNTERSINK"):
+        return []
+    axis = _unit(tuple(float(c) for c in p["axis"]))
+    h = float(p["height"])
+    r = float(p["radius"])
+    high_end = _add(tuple(float(c) for c in p["base"]), _scale(axis, h / 2.0))
+    cr = float(p.get("cbore_radius", 2.0 * r))
+    if cr <= r:
+        return []                                    # recess must be wider than the hole
+
+    if preset == "COUNTERBORE":
+        cd = float(p.get("cbore_depth", 0.25 * h))
+        c_mid = _sub(high_end, _scale(axis, cd / 2.0))
+        return [("CYLINDER", {"base": c_mid, "axis": axis, "radius": cr, "height": cd}, "HIGH")]
+
+    # COUNTERSINK: cone wide at the surface, narrowing to the hole radius inward.
+    half = math.radians(float(p.get("csink_angle", 90.0))) / 2.0
+    depth = (cr - r) / math.tan(half) if math.tan(half) > 1e-9 else 0.25 * h
+    return [("CONE", {"base": high_end, "axis": _scale(axis, -1.0),
+                      "radius1": cr, "radius2": r, "height": depth}, "LOW")]
 
 
 def _cutter_end_centers(kind, p):
@@ -294,6 +326,11 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
                 continue
             base = Cut(base, cutter).Shape()
             n_cut += 1
+            # Counterbore / countersink: subtract the extra recess at the open end.
+            for sk, sp, sgrow_ends in _expand_preset(p):
+                sub_shape, _ = build(sk, _grow_cutter(sk, sp, overshoot, sgrow_ends))
+                if sub_shape is not None:
+                    base = Cut(base, sub_shape).Shape()
         parts.append(base)
         note = f"1 body (+{len(adds)} / -{n_cut})"
     else:

@@ -243,6 +243,18 @@ def main():
         fail("thread spec did not round-trip onto the object")
     print("[ok] thread spec tagged and stored on object")
 
+    # Counterbore preset (#6): params round-trip onto the object for OCCT export.
+    cyl_feat.hole_preset = "COUNTERBORE"
+    cyl_feat.cbore_radius = 1.5
+    cyl_feat.cbore_depth = 1.0
+    if cyl_obj["reverse"].get("hole_preset") != "COUNTERBORE" \
+            or abs(cyl_obj["reverse"].get("cbore_radius", 0) - 1.5) > 1e-6:
+        fail("counterbore preset did not round-trip onto the object")
+    cyl_feat.hole_preset = "NONE"     # clearing removes the keys
+    if "hole_preset" in cyl_obj["reverse"]:
+        fail("clearing hole preset left keys on the object")
+    print("[ok] counterbore preset round-trips and clears")
+
     # STEP export of everything fitted so far.
     out = os.path.join(os.path.dirname(__file__), "smoke_export.step")
     n_reverse = sum(1 for o in bpy.context.scene.objects if "reverse" in o)
