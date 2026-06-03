@@ -202,13 +202,25 @@ def _torus(p, segments):
 
 
 def _serialise_params(kind, p, result):
-    """Flatten fit params to plain floats/lists for object custom properties."""
+    """Flatten fit params to plain floats/lists for object custom properties.
+
+    Geometry params are numeric (floats or float lists). String/bool *metadata*
+    params (e.g. ``role``, ``thread_spec``, ``hole_preset``) are passed through
+    verbatim so they round-trip back out at export — see the metadata allowlist in
+    :func:`reverse_mesh.operators._feature_from_object`.
+    """
     out = {"kind": kind, "rms": float(result.rms), "max_error": float(result.max_error)}
     for key, value in p.items():
         if key.startswith("_"):
             continue
         if isinstance(value, np.ndarray):
             out[key] = [float(x) for x in value]
+        elif isinstance(value, (list, tuple)):
+            out[key] = [float(x) for x in value]
+        elif isinstance(value, str):
+            out[key] = value                 # metadata string — keep as-is
+        elif isinstance(value, bool):
+            out[key] = bool(value)
         else:
             out[key] = float(value)
     return out

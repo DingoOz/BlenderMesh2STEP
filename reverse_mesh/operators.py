@@ -278,6 +278,13 @@ class REVERSE_OT_select_feature_object(Operator):
         return {"FINISHED"}
 
 
+# String/bool metadata params that round-trip verbatim from obj["reverse"] into
+# the export feature dict (set by features that tag geometry — fillet role,
+# thread spec, counterbore preset). Numeric feature params instead extend the
+# points/dirs/lengths schema below so they get transformed/scaled correctly.
+_METADATA_KEYS = ("role", "thread_spec", "hole_preset")
+
+
 # Which params are points / directions / lengths, for transforming to world.
 _PARAM_KINDS = {
     "PLANE": {"points": ["point"], "dirs": ["normal", "e1", "e2"],
@@ -337,6 +344,9 @@ def _feature_from_object(obj, user_scale):
             params[key] = float(data[key]) * obj_scale * s
     if "half_angle" in data.keys():
         params["half_angle"] = float(data["half_angle"])
+    for key in _METADATA_KEYS:
+        if key in data.keys():
+            params[key] = data[key]
 
     rgb = tuple(obj.color[:3])
     color = rgb if any(abs(c - 1.0) > 1e-4 for c in rgb) else None
