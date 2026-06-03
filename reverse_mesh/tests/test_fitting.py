@@ -24,6 +24,7 @@ from fitting import (  # noqa: E402
     fit_plane,
     fit_sphere,
     fit_torus,
+    signed_distances,
 )
 
 
@@ -167,6 +168,22 @@ def main():
         r = fit_auto(_region(pts, nrm))
         results.append(_check(f"auto->{name}", r is not None and r.kind == name.upper(),
                               f"got {r.kind if r else None}"))
+
+    # signed_distances must reproduce each fitter's own RMS (INFRA-A): the
+    # per-point residual evaluator and the internal aggregate must agree.
+    for name, sampler, fitter in [("plane", _sample_plane, fit_plane),
+                                  ("sphere", _sample_sphere, fit_sphere),
+                                  ("cylinder", _sample_cylinder, fit_cylinder),
+                                  ("cone", _sample_cone, fit_cone),
+                                  ("torus", _sample_torus, fit_torus),
+                                  ("box", _sample_box, fit_box)]:
+        pts, nrm = sampler()
+        r = fitter(_region(pts, nrm))
+        d = signed_distances(r, pts)
+        rms = float(np.sqrt(np.mean(d ** 2)))
+        results.append(_check(f"signed_distances->{name}",
+                              r is not None and abs(rms - r.rms) <= 1e-9 + 1e-6 * r.rms,
+                              f"rms={rms:.3e} vs r.rms={r.rms:.3e}"))
 
     print(f"\n{sum(results)}/{len(results)} passed")
     sys.exit(0 if all(results) else 1)

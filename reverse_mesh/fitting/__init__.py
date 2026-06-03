@@ -11,6 +11,8 @@ from .primitives import (
     fit_plane,
     fit_sphere,
     fit_torus,
+    predicted_normals,
+    signed_distances,
 )
 
 __all__ = [
@@ -24,4 +26,6 @@ __all__ = [
     "fit_cone",
     "fit_sphere",
     "fit_torus",
+    "predicted_normals",
+    "signed_distances",
 ]

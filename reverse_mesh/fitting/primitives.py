@@ -415,6 +415,45 @@ def predicted_normals(result: FitResult, pts: np.ndarray) -> np.ndarray:
     raise ValueError(result.kind)
 
 
+def signed_distances(result: FitResult, pts: np.ndarray) -> np.ndarray:
+    """Per-point signed residual the fitted primitive implies at ``pts``.
+
+    The sibling of :func:`predicted_normals`: where that returns the predicted
+    *normal* per point, this returns the *deviation* per point. It reproduces the
+    exact residual each fitter measures internally — the codebase otherwise keeps
+    only the aggregate ``(rms, max_error)`` — so ``rms(signed_distances(r, r_pts))``
+    recovers ``r.rms``. Used by the fit-quality heatmap and the RANSAC wrapper.
+    """
+    p = result.params
+    pts = np.asarray(pts, dtype=float)
+    if result.kind == "PLANE":
+        return (pts - np.asarray(p["point"])) @ _unit(np.asarray(p["normal"]))
+    if result.kind == "SPHERE":
+        return np.linalg.norm(pts - np.asarray(p["center"]), axis=1) - p["radius"]
+    if result.kind == "CYLINDER":
+        rel = pts - np.asarray(p["base"])
+        axis = _unit(np.asarray(p["axis"]))
+        w = rel @ axis
+        rho = np.linalg.norm(rel - np.outer(w, axis), axis=1)
+        return rho - p["radius"]
+    if result.kind == "CONE":
+        rel = pts - np.asarray(p["apex"])
+        axis = _unit(np.asarray(p["axis"]))
+        w = rel @ axis
+        perp = np.linalg.norm(rel - np.outer(w, axis), axis=1)
+        slope = float(np.tan(p["half_angle"]))
+        return perp - slope * w           # matches fit_cone's radial residual
+    if result.kind == "TORUS":
+        _, _, dist = _torus_on_axis(pts, np.asarray(p["center"]), np.asarray(p["axis"]))
+        return dist
+    if result.kind == "BOX":
+        axes = [_unit(np.asarray(p["ax"])), _unit(np.asarray(p["ay"])), _unit(np.asarray(p["az"]))]
+        half = np.array([p["hx"], p["hy"], p["hz"]])
+        local = np.column_stack([(pts - np.asarray(p["center"])) @ a for a in axes])
+        return np.min(half - np.abs(local), axis=1)   # matches fit_box's surf_dist
+    raise ValueError(result.kind)
+
+
 def _unit(v):
     n = float(np.linalg.norm(v))
     return v / n if n > 1e-12 else v
