@@ -16,7 +16,7 @@ from bpy_extras.io_utils import ExportHelper
 from mathutils import Matrix, Vector
 
 from . import build, occ_export, step_export
-from .fitting import FITTERS, Region, fit_auto
+from .fitting import FITTERS, Region, fit_auto, snap_result
 
 
 def occt_lib_dir(create=False):
@@ -108,7 +108,12 @@ class REVERSE_OT_fit_selection(Operator):
 
     def _fit_region(self, region, settings):
         kind = settings.primitive_type
-        return fit_auto(region) if kind == "AUTO" else FITTERS[kind](region)
+        result = fit_auto(region) if kind == "AUTO" else FITTERS[kind](region)
+        if result is not None and settings.snap_enabled:
+            step = (settings.snap_step if settings.snap_preset == "CUSTOM"
+                    else float(settings.snap_preset))
+            snap_result(result, step=step)   # conservative snap tolerance (own default)
+        return result
 
     def _record(self, context, settings, result, obj, build_objects):
         """Build the clean object (optional) and append a feature entry."""

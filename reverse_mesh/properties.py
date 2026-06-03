@@ -92,6 +92,33 @@ class ReverseSettings(PropertyGroup):
         min=1.0,
         max=180.0,
     )
+    snap_enabled: BoolProperty(
+        name="Snap dimensions",
+        description=(
+            "Round fitted radii/lengths to a nice value when they're already very "
+            "close (e.g. 19.98 → 20.0), so the STEP carries manufacturable numbers"
+        ),
+        default=False,
+    )
+    snap_preset: EnumProperty(
+        name="Snap to",
+        description="Grid the fitted dimensions snap to",
+        items=[
+            ("0.1", "0.1", "Nearest 0.1"),
+            ("0.5", "0.5", "Nearest 0.5"),
+            ("1.0", "1.0", "Nearest 1.0"),
+            ("CUSTOM", "Custom", "Nearest multiple of a custom step"),
+        ],
+        default="1.0",
+    )
+    snap_step: FloatProperty(
+        name="Custom step",
+        description="Snap grid used when 'Snap to' is Custom",
+        default=1.0,
+        min=1e-6,
+        max=1e6,
+        precision=4,
+    )
     segments: IntProperty(
         name="Segments",
         description="Tessellation resolution of generated round primitives",

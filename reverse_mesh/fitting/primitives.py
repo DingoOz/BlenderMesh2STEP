@@ -19,7 +19,67 @@ from .common import (
     region_scale,
     residual_stats,
     smallest_singular_axis,
+    snap_value,
 )
+
+
+def summarize(kind: str, p: dict) -> str:
+    """One-line human summary of a fit from its params — the single source of
+    truth shared by the fitters and by :func:`snap_result` (so a snapped fit's
+    summary stays in the same format)."""
+    if kind == "PLANE":
+        n = p["normal"]
+        return f"Plane · n=({n[0]:.3f}, {n[1]:.3f}, {n[2]:.3f})"
+    if kind == "SPHERE":
+        return f"Sphere · r={p['radius']:.4g}"
+    if kind == "CYLINDER":
+        return f"Cylinder · r={p['radius']:.4g} · h={p['height']:.4g}"
+    if kind == "CONE":
+        return (f"Cone · r1={p['radius1']:.3g} r2={p['radius2']:.3g} · "
+                f"{np.degrees(p['half_angle']):.1f}°")
+    if kind == "TORUS":
+        return f"Torus · R={p['major_radius']:.4g} r={p['minor_radius']:.4g}"
+    if kind == "BOX":
+        return f"Box · {2 * p['hx']:.3g}×{2 * p['hy']:.3g}×{2 * p['hz']:.3g}"
+    return kind
+
+
+# Which params of each kind are snappable lengths/radii (see :func:`snap_result`).
+_LENGTH_KEYS = {
+    "PLANE": ("half_u", "half_v"),
+    "BOX": ("hx", "hy", "hz"),
+    "CYLINDER": ("radius", "height"),
+    "CONE": ("radius1", "radius2", "height"),
+    "SPHERE": ("radius",),
+    "TORUS": ("major_radius", "minor_radius"),
+}
+
+
+def snap_result(result: FitResult, step=None, preferred=None,
+                rel_tol=None) -> tuple[FitResult, bool]:
+    """Snap a fit's dimensions to 'nice' values in place; return (result, changed).
+
+    Mutates the length/radius params via :func:`snap_value`, keeps the cone's
+    ``half_angle`` consistent with its snapped radii, and regenerates ``summary``.
+    """
+    if result is None:
+        return result, False
+    kw = {} if rel_tol is None else {"rel_tol": rel_tol}
+    changed = False
+    for key in _LENGTH_KEYS.get(result.kind, ()):
+        if key in result.params:
+            v, ch = snap_value(float(result.params[key]), step, preferred, **kw)
+            if ch:
+                result.params[key] = v
+                changed = True
+    if changed:
+        if result.kind == "CONE":
+            p = result.params
+            h = float(p.get("height", 0.0))
+            if h > 1e-12:
+                p["half_angle"] = float(np.arctan(abs(p["radius2"] - p["radius1"]) / h))
+        result.summary = summarize(result.kind, result.params)
+    return result, changed
 
 
 def fit_plane(region: Region) -> FitResult | None:
@@ -41,21 +101,17 @@ def fit_plane(region: Region) -> FitResult | None:
     half_u = float(np.max(np.abs(rel @ e1))) if len(rel) else 1.0
     half_v = float(np.max(np.abs(rel @ e2))) if len(rel) else 1.0
 
-    return FitResult(
-        kind="PLANE",
-        rms=rms,
-        max_error=max_err,
-        params={
-            "point": centroid,
-            "normal": normal,
-            "e1": e1,
-            "e2": e2,
-            "half_u": half_u,
-            "half_v": half_v,
-            "_scale": region_scale(points),
-        },
-        summary=f"Plane · n=({normal[0]:.3f}, {normal[1]:.3f}, {normal[2]:.3f})",
-    )
+    params = {
+        "point": centroid,
+        "normal": normal,
+        "e1": e1,
+        "e2": e2,
+        "half_u": half_u,
+        "half_v": half_v,
+        "_scale": region_scale(points),
+    }
+    return FitResult(kind="PLANE", rms=rms, max_error=max_err, params=params,
+                     summary=summarize("PLANE", params))
 
 
 def fit_sphere(region: Region) -> FitResult | None:
@@ -72,13 +128,9 @@ def fit_sphere(region: Region) -> FitResult | None:
     radial = np.linalg.norm(points - center, axis=1) - radius
     rms, max_err = residual_stats(radial)
 
-    return FitResult(
-        kind="SPHERE",
-        rms=rms,
-        max_error=max_err,
-        params={"center": center, "radius": radius, "_scale": region_scale(points)},
-        summary=f"Sphere · r={radius:.4g}",
-    )
+    params = {"center": center, "radius": radius, "_scale": region_scale(points)}
+    return FitResult(kind="SPHERE", rms=rms, max_error=max_err, params=params,
+                     summary=summarize("SPHERE", params))
 
 
 def fit_cylinder(region: Region) -> FitResult | None:
@@ -113,19 +165,15 @@ def fit_cylinder(region: Region) -> FitResult | None:
         + axis * ((w_min + w_max) / 2.0)
     )
 
-    return FitResult(
-        kind="CYLINDER",
-        rms=rms,
-        max_error=max_err,
-        params={
-            "base": center3d,      # midpoint of the axial span, on the axis
-            "axis": axis,
-            "radius": radius,
-            "height": height,
-            "_scale": region_scale(points),
-        },
-        summary=f"Cylinder · r={radius:.4g} · h={height:.4g}",
-    )
+    params = {
+        "base": center3d,      # midpoint of the axial span, on the axis
+        "axis": axis,
+        "radius": radius,
+        "height": height,
+        "_scale": region_scale(points),
+    }
+    return FitResult(kind="CYLINDER", rms=rms, max_error=max_err, params=params,
+                     summary=summarize("CYLINDER", params))
 
 
 def fit_cone(region: Region) -> FitResult | None:
@@ -174,22 +222,18 @@ def fit_cone(region: Region) -> FitResult | None:
     base3d = apex + axis * w_min          # on the axis, at the r1 end
     half_angle = float(np.arctan(abs(slope)))
 
-    return FitResult(
-        kind="CONE",
-        rms=rms,
-        max_error=max_err,
-        params={
-            "base": base3d,        # on the axis, at the r1 (w_min) end
-            "axis": axis,
-            "radius1": r1,
-            "radius2": r2,
-            "height": height,
-            "apex": apex,
-            "half_angle": half_angle,
-            "_scale": region_scale(surf),
-        },
-        summary=f"Cone · r1={r1:.3g} r2={r2:.3g} · {np.degrees(half_angle):.1f}°",
-    )
+    params = {
+        "base": base3d,        # on the axis, at the r1 (w_min) end
+        "axis": axis,
+        "radius1": r1,
+        "radius2": r2,
+        "height": height,
+        "apex": apex,
+        "half_angle": half_angle,
+        "_scale": region_scale(surf),
+    }
+    return FitResult(kind="CONE", rms=rms, max_error=max_err, params=params,
+                     summary=summarize("CONE", params))
 
 
 def _torus_on_axis(points: np.ndarray, center: np.ndarray, axis: np.ndarray):
@@ -254,19 +298,15 @@ def fit_torus(region: Region) -> FitResult | None:
     _, _, dist = _torus_on_axis(points, center, axis)
     rms, max_err = residual_stats(dist)
 
-    return FitResult(
-        kind="TORUS",
-        rms=rms,
-        max_error=max_err,
-        params={
-            "center": center,
-            "axis": axis,
-            "major_radius": big_r,
-            "minor_radius": r_tube,
-            "_scale": region_scale(points),
-        },
-        summary=f"Torus · R={big_r:.4g} r={r_tube:.4g}",
-    )
+    params = {
+        "center": center,
+        "axis": axis,
+        "major_radius": big_r,
+        "minor_radius": r_tube,
+        "_scale": region_scale(points),
+    }
+    return FitResult(kind="TORUS", rms=rms, max_error=max_err, params=params,
+                     summary=summarize("TORUS", params))
 
 
 def _cluster_axes(normals, tol_cos=0.966):
@@ -351,18 +391,14 @@ def fit_box(region: Region) -> FitResult | None:
     surf_dist = np.min(half - np.abs(local), axis=1)
     rms, max_err = residual_stats(surf_dist)
 
-    return FitResult(
-        kind="BOX",
-        rms=rms,
-        max_error=max_err,
-        params={
-            "center": center,
-            "ax": ax, "ay": ay, "az": az,
-            "hx": float(half[0]), "hy": float(half[1]), "hz": float(half[2]),
-            "_scale": scale,
-        },
-        summary=f"Box · {2*half[0]:.3g}×{2*half[1]:.3g}×{2*half[2]:.3g}",
-    )
+    params = {
+        "center": center,
+        "ax": ax, "ay": ay, "az": az,
+        "hx": float(half[0]), "hy": float(half[1]), "hz": float(half[2]),
+        "_scale": scale,
+    }
+    return FitResult(kind="BOX", rms=rms, max_error=max_err, params=params,
+                     summary=summarize("BOX", params))
 
 
 def predicted_normals(result: FitResult, pts: np.ndarray) -> np.ndarray:

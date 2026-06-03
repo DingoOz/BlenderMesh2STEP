@@ -95,6 +95,18 @@ def main():
         fail("AUTO did not detect cylinder")
     print("[ok] AUTO detected CYLINDER")
 
+    # Dimension snapping (#3): with snap on, the r≈2 fit must store exactly 2.0.
+    settings.primitive_type = "CYLINDER"
+    settings.snap_enabled = True
+    settings.snap_preset = "0.5"
+    bpy.ops.reverse.fit_selection()
+    snapfeat = bpy.context.scene.reverse.features[-1]
+    snapobj = bpy.data.objects.get(snapfeat.object_name)
+    if snapobj["reverse"]["radius"] != 2.0:
+        fail(f"snap did not land radius on 2.0: {snapobj['reverse']['radius']}")
+    print(f"[ok] snapping stored exact radius {snapobj['reverse']['radius']}")
+    settings.snap_enabled = False
+
     # Torus: whole-mesh fit through the same pipeline.
     bpy.ops.object.mode_set(mode="OBJECT")
     bpy.ops.mesh.primitive_torus_add(major_radius=5.0, minor_radius=1.2,
