@@ -657,6 +657,14 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
         ),
         default=0.05, min=0.0, max=1.0, subtype="FACTOR",
     )
+    auto_stitch: BoolProperty(
+        name="Auto-stitch shared edges",
+        description=(
+            "Fuse the additive solids and unify coincident faces so abutting "
+            "features share real edges (one box instead of two islands). OCCT only"
+        ),
+        default=False,
+    )
     make_watertight: BoolProperty(
         name="Make watertight",
         description=(
@@ -734,7 +742,8 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
                                          merge=self.merge_solids,
                                          overshoot=self.cutter_overshoot,
                                          watertight=self.make_watertight,
-                                         sew_tol=self.sew_tolerance)
+                                         sew_tol=self.sew_tolerance,
+                                         auto_stitch=self.auto_stitch)
                 context.scene.reverse.last_report = _format_report(info)
                 self.report({"INFO"}, f"Exported via OCCT: {info}")
                 return {"FINISHED"}
