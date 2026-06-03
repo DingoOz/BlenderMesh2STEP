@@ -148,7 +148,29 @@ class REVERSE_PT_features(Panel):
             col.operator("reverse.install_occt", icon="IMPORT")
 
 
-classes = (REVERSE_UL_features, REVERSE_PT_main, REVERSE_PT_features)
+class REVERSE_PT_report(Panel):
+    bl_label = "Validation Report"
+    bl_idname = "REVERSE_PT_report"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Reverse"
+    bl_parent_id = "REVERSE_PT_main"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        layout = self.layout
+        report = context.scene.reverse.last_report
+        if not report:
+            layout.label(text="Export a STEP file to see validation", icon="INFO")
+            return
+        box = layout.box()
+        for line in report.split("\n"):
+            icon = "CHECKMARK" if ("valid" in line and "INVALID" not in line) or "✓" in line \
+                else ("ERROR" if ("INVALID" in line or "NOT watertight" in line) else "DOT")
+            box.label(text=line, icon=icon)
+
+
+classes = (REVERSE_UL_features, REVERSE_PT_main, REVERSE_PT_features, REVERSE_PT_report)
 
 
 def register():
