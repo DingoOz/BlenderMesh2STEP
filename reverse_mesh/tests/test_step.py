@@ -15,6 +15,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import pmi_export  # noqa: E402
 import step_export as se  # noqa: E402
 
 
@@ -104,6 +105,21 @@ def main():
             check("OCCT import", False, f"status={status}")
     except ImportError:
         print("[skip] OCCT not available — structural checks only")
+
+    # PMI sidecar (#11a): dimensions + relationships from the same feature dicts.
+    pmi = pmi_export.build_pmi(_features())
+    cyl = next(f for f in pmi["features"] if f["kind"] == "CYLINDER")
+    check("pmi cylinder diameter", abs(cyl["dimensions"]["diameter"] - 4.0) < 1e-9,
+          f"d={cyl['dimensions'].get('diameter')}")
+    check("pmi carries thread", cyl["dimensions"].get("thread") == "M8x1.25")
+    sphere = next(f for f in pmi["features"] if f["kind"] == "SPHERE")
+    check("pmi sphere radius", abs(sphere["dimensions"]["radius"] - 2.5) < 1e-9)
+    # cylinder@(10,0,0) ↔ sphere@(40,0,0) → distance 30 along x.
+    dists = [r["value"] for r in pmi["relationships"] if r["type"] == "distance"]
+    check("pmi has hole spacing", any(abs(d - 30.0) < 1e-6 for d in dists),
+          f"distances include 30? {any(abs(d-30.0)<1e-6 for d in dists)}")
+    check("pmi has axis angles",
+          any(r["type"] == "axis_angle_deg" for r in pmi["relationships"]))
 
     print(f"\n{'ALL STEP CHECKS PASSED' if ok else 'STEP CHECKS FAILED'}")
     sys.exit(0 if ok else 1)
