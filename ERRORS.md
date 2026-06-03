@@ -79,3 +79,13 @@
 - **Root cause:** `select_flush(True)` propagates selection vert→edge→face (upward); a face fully surrounded by selected geometry becomes selected as a side effect, regardless of the intended face set.
 - **Fix applied:** Dropped the upward flush. `BMFace.select_set(True)` already selects the face's own verts/edges, which is all that's needed; for explicit face sets, never flush selection upward.
 - **Prevention rule:** When you have computed an exact face set, set `face.select_set(True)` per face and do NOT call `select_flush(True)`. Reserve upward flush for genuine vert/edge-driven selections; if you must flush, use `select_flush_mode()` and verify it doesn't capture fully-enclosed faces.
+
+### Trimmed least-squares can't reject outliers from a corrupted fit — 2026-06-03
+
+- **Severity:** Medium
+- **Category:** Logic
+- **File(s):** `reverse_mesh/fitting/primitives.py`
+- **Pattern:** Implementing "robust" fitting as fit-all → drop high-residual points → refit. When outliers are numerous/far enough to drag the initial least-squares fit, that fit *mis-ranks* residuals (outliers look like inliers and true inliers look like outliers), so trimming removes the wrong points and never converges to the true model.
+- **Root cause:** The trim threshold is computed from a model already biased by the outliers; iterative trimming has no way to escape a bad basin.
+- **Fix applied:** Replaced trimmed-LSQ with RANSAC consensus: fit many small random samples, keep the model with the most inliers, then refit once on that consensus set. Added a short-circuit returning the plain fit when it is already clean (rel_rms < 1e-3) so machine-precision fits are never disturbed.
+- **Prevention rule:** For outlier rejection, find the model by minimal/small-sample consensus (RANSAC), not by trimming a global fit. Only trim/reweight once you already have an outlier-free model estimate.

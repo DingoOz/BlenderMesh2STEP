@@ -130,6 +130,23 @@ class ReverseSettings(PropertyGroup):
         max=1e6,
         precision=4,
     )
+    use_ransac: BoolProperty(
+        name="Reject outliers (robust fit)",
+        description=(
+            "Trim stray faces/points that deviate from the surface and refit on "
+            "the rest — survives a slightly dirty selection (a chamfer, an odd "
+            "triangle) without abandoning the clean-mesh sweet spot"
+        ),
+        default=False,
+    )
+    ransac_threshold: FloatProperty(
+        name="Outlier threshold",
+        description="Points/faces beyond this fraction of the region size are dropped",
+        default=0.02,
+        min=1e-4,
+        max=1.0,
+        precision=4,
+    )
     show_heatmap: BoolProperty(
         name="Fit-quality heatmap",
         description=(
