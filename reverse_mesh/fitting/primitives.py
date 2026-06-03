@@ -492,13 +492,19 @@ _GOOD_FIT = 1e-3
 _PREFERENCE = {"PLANE": 0, "BOX": 1, "CYLINDER": 2, "CONE": 3, "SPHERE": 4, "TORUS": 5}
 
 
-def fit_auto(region: Region) -> FitResult | None:
+def fit_auto(region: Region, return_candidates: bool = False):
     """Try every primitive and return the best fit.
 
     Selection order:
       1. Drop fits whose predicted normals disagree with the face normals.
       2. Among fits that are essentially exact, prefer the simplest primitive.
       3. Otherwise take the lowest relative RMS.
+
+    With ``return_candidates=True`` returns ``(best, candidates)`` where
+    ``candidates`` is every successful fit annotated with its agreement metrics,
+    sorted best-first (winner, then ascending relative RMS) — for surfacing the
+    runner-ups and the tie-break margin in the UI. ``best`` is ``None`` only when
+    no primitive fit at all.
     """
     candidates = []
     for fitter in FITTERS.values():
@@ -509,12 +515,30 @@ def fit_auto(region: Region) -> FitResult | None:
         if res is not None:
             candidates.append(res)
     if not candidates:
-        return None
+        return (None, []) if return_candidates else None
 
     aligned = [r for r in candidates if normal_alignment(r, region) >= _ALIGNMENT_GATE]
     pool = aligned if aligned else candidates
 
     good = [r for r in pool if r.rel_rms < _GOOD_FIT]
     if good:
-        return min(good, key=lambda r: _PREFERENCE[r.kind])
-    return min(pool, key=lambda r: r.rel_rms)
+        best = min(good, key=lambda r: _PREFERENCE[r.kind])
+    else:
+        best = min(pool, key=lambda r: r.rel_rms)
+
+    if not return_candidates:
+        return best
+
+    annotated = [
+        {
+            "kind": r.kind,
+            "rel_rms": r.rel_rms,
+            "alignment": normal_alignment(r, region),
+            "gated": r in pool,
+            "winner": r is best,
+            "result": r,
+        }
+        for r in candidates
+    ]
+    annotated.sort(key=lambda c: (not c["winner"], c["rel_rms"]))
+    return best, annotated

@@ -185,6 +185,19 @@ def main():
                               r is not None and abs(rms - r.rms) <= 1e-9 + 1e-6 * r.rms,
                               f"rms={rms:.3e} vs r.rms={r.rms:.3e}"))
 
+    # fit_auto(return_candidates=True): back-compat + ordering (INFRA-D).
+    pts, nrm = _sample_cylinder()
+    best_only = fit_auto(_region(pts, nrm))
+    best, cands = fit_auto(_region(pts, nrm), return_candidates=True)
+    ok_cand = (best is not None and best.kind == "CYLINDER"
+               and best_only.kind == best.kind            # single-return unchanged
+               and len(cands) >= 1 and cands[0]["winner"]  # winner sorted first
+               and cands[0]["result"] is best
+               and all(cands[i]["rel_rms"] <= cands[i + 1]["rel_rms"] + 1e-12
+                       for i in range(1, len(cands) - 1)))  # rest ascending
+    results.append(_check("auto candidates", ok_cand,
+                          f"n={len(cands)} top={cands[0]['kind'] if cands else None}"))
+
     print(f"\n{sum(results)}/{len(results)} passed")
     sys.exit(0 if all(results) else 1)
 
