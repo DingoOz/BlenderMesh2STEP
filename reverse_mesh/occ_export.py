@@ -181,6 +181,20 @@ def _cutter_end_centers(kind, p):
     return None
 
 
+def _unify(shape):
+    """Merge coincident faces/edges of a fused shape into shared topology.
+
+    After fusing abutting solids, OCCT leaves their touching faces split along the
+    old boundaries (independent edges). ``ShapeUpgrade_UnifySameDomain`` collapses
+    coplanar faces and coincident edges so neighbours genuinely share edges —
+    turning two fused boxes into one box with 6 faces, not 10.
+    """
+    (Unify,) = _imp("ShapeUpgrade", "ShapeUpgrade_UnifySameDomain")
+    u = Unify(shape, True, True, True)   # unify edges, unify faces, concat b-splines
+    u.Build()
+    return u.Shape()
+
+
 def _make_watertight(shape, tol):
     """Sew all faces of ``shape`` into shells, solidify and heal them.
 
@@ -229,13 +243,14 @@ def _make_watertight(shape, tol):
 
 
 def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
-           watertight=False, sew_tol=0.01):
+           watertight=False, sew_tol=0.01, auto_stitch=False):
     """Build OCCT solids from ``features`` and write an AP242 STEP file.
 
     Returns a short status string. If ``merge`` is set, all solids are fused into
     a single body before writing (planes are added alongside as faces). Subtractive
     cylinders/cones are extended by ``overshoot`` (fraction per end) so their ends
-    cut cleanly through coplanar faces.
+    cut cleanly through coplanar faces. ``auto_stitch`` fuses the additive solids
+    and unifies their coincident faces into shared topology (best-effort).
     """
     (gp_Pnt, gp_Dir, gp_Ax2, gp_Ax3, gp_Pln) = _imp(
         "gp", "gp_Pnt", "gp_Dir", "gp_Ax2", "gp_Ax3", "gp_Pln")
@@ -307,7 +322,7 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
     if not adds and not cutters and not faces:
         raise ValueError("No exportable shapes")
 
-    do_bool = merge or bool(cutters)
+    do_bool = merge or auto_stitch or bool(cutters)
     parts = list(faces)
     note = ""
     if do_bool and adds:
@@ -331,8 +346,16 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
                 sub_shape, _ = build(sk, _grow_cutter(sk, sp, overshoot, sgrow_ends))
                 if sub_shape is not None:
                     base = Cut(base, sub_shape).Shape()
+        if auto_stitch:
+            try:
+                base = _unify(base)
+                note_stitch = " — stitched (shared topology)"
+            except Exception as exc:
+                note_stitch = f" — stitch failed: {exc}"
+        else:
+            note_stitch = ""
         parts.append(base)
-        note = f"1 body (+{len(adds)} / -{n_cut})"
+        note = f"1 body (+{len(adds)} / -{n_cut}){note_stitch}"
     else:
         # No base to cut from: export everything separately (overshoot is moot).
         for feat in cutters:

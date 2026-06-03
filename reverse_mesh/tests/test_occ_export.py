@@ -216,6 +216,38 @@ def main():
     except OSError:
         pass
 
+    # Auto-stitch (#4): two boxes abutting at z=0 form a 2x2x4 bar. Fuse + unify
+    # must give ONE solid with 6 faces (coplanar sides merged), not 10.
+    two_boxes = [
+        {"kind": "BOX", "op": "ADD", "name": "low", "params": {
+            "center": (0, 0, -1), "ax": (1, 0, 0), "ay": (0, 1, 0), "az": (0, 0, 1),
+            "hx": 1.0, "hy": 1.0, "hz": 1.0}},
+        {"kind": "BOX", "op": "ADD", "name": "high", "params": {
+            "center": (0, 0, 1), "ax": (1, 0, 0), "ay": (0, 1, 0), "az": (0, 0, 1),
+            "hx": 1.0, "hy": 1.0, "hz": 1.0}},
+    ]
+    out_st = os.path.join(os.path.dirname(__file__), "occ_stitch.step")
+    info_st = occ_export.export(two_boxes, out_st, unit="MM", auto_stitch=True)
+    print("[info] stitch:", info_st)
+    rst = STEPControl_Reader(); rst.ReadFile(out_st); rst.TransferRoots(); shst = rst.OneShape()
+    n_st = 0
+    e = TopExp_Explorer(shst, TopAbs_SOLID)
+    while e.More():
+        n_st += 1; e.Next()
+    nf_st = 0
+    e = TopExp_Explorer(shst, TopAbs_FACE)
+    while e.More():
+        nf_st += 1; e.Next()
+    prst = GProp_GProps(); BRepGProp.VolumeProperties_s(shst, prst); v_st = prst.Mass()
+    print(f"[info] stitched bar: solids={n_st} faces={nf_st} volume={v_st:.3f} (expect 1, 6, 16)")
+    if n_st != 1 or nf_st != 6 or abs(v_st - 16.0) > 0.01 or not BRepCheck_Analyzer(shst).IsValid():
+        fail(f"auto-stitch did not unify two boxes (solids={n_st}, faces={nf_st}, vol={v_st:.3f})")
+    print("[ok] auto-stitch: two abutting boxes → 1 solid, 6 shared faces")
+    try:
+        os.remove(out_st)
+    except OSError:
+        pass
+
     # Watertight: 6 loose planes that tile a 2x2x2 box must sew into one closed solid.
     def plane(c, n, e1, e2):
         return {"kind": "PLANE", "op": "ADD", "name": "f", "params": {
