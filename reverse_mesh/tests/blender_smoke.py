@@ -170,6 +170,55 @@ def main():
     print(f"[ok] box half-extents {dims} (rotation recovered)")
     bpy.ops.object.mode_set(mode="OBJECT")
 
+    # Feature stack (#7): reorder, re-fit, remove, and load-time reconcile.
+    feats = bpy.context.scene.reverse.features
+    n_feats = len(feats)
+    if n_feats < 2:
+        fail("need at least 2 features to test the stack")
+    # Reorder: swap the first two and confirm the order changes.
+    k0, k1 = feats[0].kind, feats[1].kind
+    bpy.context.scene.reverse.active_feature = 0
+    if bpy.ops.reverse.move_feature(direction="DOWN") != {"FINISHED"}:
+        fail("move_feature failed")
+    if feats[0].kind != k1 or feats[1].kind != k0:
+        fail(f"reorder did not swap: {[f.kind for f in feats][:2]}")
+    print(f"[ok] feature reorder swapped {k0}↔{k1}")
+
+    # Re-fit: pick a feature with stored source faces and regenerate its object.
+    ri = next((i for i, f in enumerate(feats)
+               if f.source_object and f.source_faces and f.object_name), None)
+    if ri is None:
+        fail("no feature carried source faces for re-fit")
+    bpy.context.scene.reverse.active_feature = ri
+    old_name = feats[ri].object_name
+    old_kind = feats[ri].kind
+    if bpy.ops.reverse.refit_feature() != {"FINISHED"}:
+        fail("refit_feature failed")
+    if feats[ri].kind != old_kind:
+        fail(f"re-fit changed kind {old_kind}→{feats[ri].kind}")
+    if bpy.data.objects.get(old_name) is not None and feats[ri].object_name == old_name:
+        fail("re-fit did not rebuild the object")
+    print(f"[ok] re-fit regenerated {old_kind} object")
+
+    # Remove: deletes the entry and its clean object.
+    bpy.context.scene.reverse.active_feature = ri
+    victim = feats[ri].object_name
+    if bpy.ops.reverse.remove_feature() != {"FINISHED"}:
+        fail("remove_feature failed")
+    if len(feats) != n_feats - 1 or bpy.data.objects.get(victim) is not None:
+        fail("remove_feature left the entry or object behind")
+    print(f"[ok] removed feature + object ({len(feats)} left)")
+
+    # Reconcile: clearing the list then reconciling rebuilds it from objects.
+    from reverse_mesh.operators import _reconcile_scene
+    n_objs = sum(1 for o in bpy.context.scene.objects
+                 if o.type == "MESH" and "reverse" in o)
+    feats.clear()
+    _reconcile_scene(bpy.context.scene)
+    if len(feats) != n_objs:
+        fail(f"reconcile rebuilt {len(feats)} features, expected {n_objs} objects")
+    print(f"[ok] reconcile rebuilt {len(feats)} features from scene objects")
+
     # STEP export of everything fitted so far.
     out = os.path.join(os.path.dirname(__file__), "smoke_export.step")
     n_reverse = sum(1 for o in bpy.context.scene.objects if "reverse" in o)
