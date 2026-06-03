@@ -124,6 +124,9 @@ class REVERSE_PT_features(Panel):
         row.operator("reverse.select_feature_object", icon="RESTRICT_SELECT_OFF", text="Select")
         row.operator("reverse.clear_features", icon="TRASH", text="Clear")
 
+        layout.operator("reverse.propagate_pattern", icon="MOD_ARRAY",
+                        text="Propagate Pattern (find matching holes)")
+
         if 0 <= settings.active_feature < len(settings.features):
             item = settings.features[settings.active_feature]
             box = layout.box()

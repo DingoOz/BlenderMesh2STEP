@@ -18,7 +18,8 @@ from mathutils import Matrix, Vector
 
 from . import build, occ_export, overlay, pmi_export, step_export
 from .fitting import (
-    FITTERS, Region, fit_auto, fit_robust, signed_distances, snap_result, summarize,
+    FITTERS, Region, classify_arrangement, fit_auto, fit_robust, match_cylinders,
+    signed_distances, snap_result, summarize,
 )
 from .fitting.common import deviation_color
 
@@ -62,6 +63,32 @@ def _face_tris_world(face, mw):
     vs = [mw @ v.co for v in face.verts]
     return [(tuple(vs[0]), tuple(vs[i]), tuple(vs[i + 1]))
             for i in range(1, len(vs) - 1)]
+
+
+def _add_feature(context, settings, result, src_obj, *, build_object, operation,
+                 cut, runner_up="", source_faces=""):
+    """Build the optional clean object and append a feature entry; return the item.
+
+    Shared by the fit operator and pattern propagation (which supplies the seed's
+    role/cut instead of the scene defaults)."""
+    obj_name = ""
+    if build_object:
+        new_obj = build.build_object(context, result, settings.segments,
+                                     operation=operation, cut_mode=cut)
+        obj_name = new_obj.name
+    item = settings.features.add()
+    item.kind = result.kind
+    item.summary = result.summary
+    item.rms = result.rms
+    item.max_error = result.max_error
+    item.object_name = obj_name
+    item.operation = operation
+    item.cut_mode = cut
+    item.runner_up = runner_up
+    item.source_object = src_obj.name
+    item.source_faces = source_faces
+    settings.active_feature = len(settings.features) - 1
+    return item
 
 
 def _grow_region(seed, pool, angle_threshold_rad, visited=None):
@@ -163,25 +190,9 @@ class REVERSE_OT_fit_selection(Operator):
     def _record(self, context, settings, result, runner_up, obj, build_objects,
                 source_faces=""):
         """Build the clean object (optional) and append a feature entry."""
-        op = settings.default_operation
-        cut = settings.default_cut_mode
-        obj_name = ""
-        if build_objects:
-            new_obj = build.build_object(context, result, settings.segments,
-                                         operation=op, cut_mode=cut)
-            obj_name = new_obj.name
-        item = settings.features.add()
-        item.kind = result.kind
-        item.summary = result.summary
-        item.rms = result.rms
-        item.max_error = result.max_error
-        item.object_name = obj_name
-        item.operation = op
-        item.cut_mode = cut
-        item.runner_up = runner_up
-        item.source_object = obj.name
-        item.source_faces = source_faces
-        settings.active_feature = len(settings.features) - 1
+        _add_feature(context, settings, result, obj, build_object=build_objects,
+                     operation=settings.default_operation, cut=settings.default_cut_mode,
+                     runner_up=runner_up, source_faces=source_faces)
 
     def execute(self, context):
         settings = context.scene.reverse
@@ -436,6 +447,100 @@ class REVERSE_OT_refit_feature(Operator):
         feat.rms = result.rms
         feat.max_error = result.max_error
         self.report({"INFO"}, f"Re-fitted {result.kind} · RMS {result.rms:.4g}")
+        return {"FINISHED"}
+
+
+class REVERSE_OT_propagate_pattern(Operator):
+    """Find and fit every hole matching the active one across the whole mesh
+
+    From a seed cylinder (e.g. one hole of a bolt circle), this segments the
+    source mesh, fits each region, and recovers every other cylinder with the
+    same radius and a parallel axis — fitting them with the seed's role/cut. It
+    also reports the arrangement (circular, linear, scattered).
+    """
+
+    bl_idname = "reverse.propagate_pattern"
+    bl_label = "Propagate Pattern"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        s = context.scene.reverse
+        if not (0 <= s.active_feature < len(s.features)):
+            return False
+        f = s.features[s.active_feature]
+        return f.kind == "CYLINDER" and bool(f.source_object) and \
+            bpy.data.objects.get(f.source_object) is not None
+
+    def execute(self, context):
+        s = context.scene.reverse
+        feat = s.features[s.active_feature]
+        src = bpy.data.objects.get(feat.source_object)
+        seed_obj = bpy.data.objects.get(feat.object_name) if feat.object_name else None
+        if src is None or seed_obj is None or "reverse" not in seed_obj:
+            self.report({"WARNING"}, "Seed feature's mesh/object is gone")
+            return {"CANCELLED"}
+
+        seed = _feature_from_object(seed_obj, 1.0)["params"]
+        seed_cyl = {"radius": seed["radius"], "axis": seed["axis"],
+                    "center": seed["base"], "height": seed["height"]}
+        seed_center = np.array(seed["base"])
+        seed_r = seed["radius"]
+
+        # Segment the whole source mesh and fit a cylinder to each region.
+        prev_active = context.view_layer.objects.active
+        if context.object and context.object.mode == "EDIT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+        bpy.ops.object.select_all(action="DESELECT")
+        src.select_set(True)
+        context.view_layer.objects.active = src
+        bpy.ops.object.mode_set(mode="EDIT")
+        bm = bmesh.from_edit_mesh(src.data)
+        all_faces = list(bm.faces)
+        clusters = _segment_faces(all_faces, math.radians(s.segment_angle))
+        mw = src.matrix_world
+        nmat = mw.to_3x3().inverted_safe().transposed()
+        regions = [_region_from_faces(c, mw, nmat) for c in clusters]
+        cluster_idx = [",".join(str(f.index) for f in c) for c in clusters]
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+        candidates = []
+        for region in regions:
+            if len(region.points) < 6:
+                candidates.append(None)
+                continue
+            fit = FITTERS["CYLINDER"](region)
+            candidates.append(None if fit is None else {
+                "radius": fit.params["radius"], "axis": fit.params["axis"],
+                "center": fit.params["base"], "height": fit.params["height"], "_fit": fit})
+
+        idxs = match_cylinders(seed_cyl, candidates,
+                               radius_tol=0.05, axis_tol_deg=5.0)
+
+        matched_centers = []
+        created = 0
+        for i in idxs:
+            c = candidates[i]
+            center = np.array(c["center"])
+            matched_centers.append(center)
+            if np.linalg.norm(center - seed_center) < 0.5 * max(seed_r, 1e-6):
+                continue                              # this is the seed itself
+            _add_feature(context, s, c["_fit"], src, build_object=True,
+                         operation=feat.operation, cut=feat.cut_mode,
+                         source_faces=cluster_idx[i])
+            created += 1
+
+        if prev_active is not None:
+            context.view_layer.objects.active = prev_active
+
+        kind, info = classify_arrangement(matched_centers, seed["axis"]) \
+            if matched_centers else ("SINGLE", {})
+        if created == 0:
+            self.report({"INFO"}, "No other matching holes found")
+            return {"FINISHED"}
+        self.report({"INFO"},
+                    f"Propagated {created} more hole(s) · {kind.lower()} pattern "
+                    f"of {len(matched_centers)}")
         return {"FINISHED"}
 
 
@@ -868,6 +973,7 @@ classes = (
     REVERSE_OT_move_feature,
     REVERSE_OT_remove_feature,
     REVERSE_OT_refit_feature,
+    REVERSE_OT_propagate_pattern,
     REVERSE_OT_clear_features,
     REVERSE_OT_set_operation,
     REVERSE_OT_set_cut_mode,

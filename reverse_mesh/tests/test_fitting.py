@@ -29,6 +29,7 @@ from fitting import (  # noqa: E402
     snap_result,
 )
 from fitting.common import deviation_color, snap_value  # noqa: E402
+from fitting.patterns import classify_arrangement, match_cylinders  # noqa: E402
 
 
 def _region(pts, nrm):
@@ -240,6 +241,27 @@ def main():
     results.append(_check("robust rejects outliers",
                           robust is not None and err_robust < 0.05 and err_robust < err_plain,
                           f"plain r={plain.params['radius']:.3f} robust r={robust.params['radius']:.3f}"))
+
+    # Pattern propagation (#8): 6 holes on a bolt circle, plus two decoys.
+    bolt_r = 5.0
+    seed = {"radius": 1.0, "axis": (0, 0, 1), "center": (bolt_r, 0, 0)}
+    cands = []
+    centers = []
+    for k in range(6):
+        a = 2 * math.pi * k / 6
+        ctr = (bolt_r * math.cos(a), bolt_r * math.sin(a), 0.0)
+        centers.append(ctr)
+        cands.append({"radius": 1.0, "axis": (0, 0, 1), "center": ctr})
+    cands.append({"radius": 2.5, "axis": (0, 0, 1), "center": (0, 0, 0)})     # wrong radius
+    cands.append({"radius": 1.0, "axis": (1, 0, 0), "center": (0, 0, 3)})     # wrong axis
+    matched = match_cylinders(seed, cands, radius_tol=0.05, axis_tol_deg=5.0)
+    results.append(_check("pattern match", matched == [0, 1, 2, 3, 4, 5],
+                          f"matched {matched}"))
+    kind, info = classify_arrangement(centers, (0, 0, 1))
+    results.append(_check("pattern circular", kind == "CIRCULAR" and info["count"] == 6
+                          and abs(info["radius"] - bolt_r) < 1e-6, f"{kind} {info}"))
+    lin_kind, _ = classify_arrangement([(0, 0, 0), (2, 0, 0), (4, 0, 0), (6, 0, 0)], (0, 0, 1))
+    results.append(_check("pattern linear", lin_kind == "LINEAR", f"got {lin_kind}"))
 
     print(f"\n{sum(results)}/{len(results)} passed")
     sys.exit(0 if all(results) else 1)

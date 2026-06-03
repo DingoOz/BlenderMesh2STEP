@@ -2,6 +2,7 @@
 """Primitive-fitting core. Pure NumPy, no Blender dependency."""
 
 from .common import FitResult, Region
+from .patterns import classify_arrangement, match_cylinders
 from .primitives import (
     FITTERS,
     fit_auto,
@@ -34,4 +35,6 @@ __all__ = [
     "signed_distances",
     "snap_result",
     "summarize",
+    "match_cylinders",
+    "classify_arrangement",
 ]

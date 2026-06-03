@@ -232,6 +232,45 @@ def main():
         fail(f"reconcile rebuilt {len(feats)} features, expected {n_objs} objects")
     print(f"[ok] reconcile rebuilt {len(feats)} features from scene objects")
 
+    # Pattern propagation (#8): three identical cylinders in one mesh. Fit one,
+    # propagate, and the other two must be found and fitted.
+    bpy.ops.object.mode_set(mode="OBJECT")
+    holes = []
+    for x in (0.0, 5.0, 10.0):
+        bpy.ops.mesh.primitive_cylinder_add(radius=1.0, depth=4.0, vertices=48,
+                                            location=(x, -20.0, 0.0))
+        holes.append(bpy.context.active_object)
+    bpy.ops.object.select_all(action="DESELECT")
+    for o in holes:
+        o.select_set(True)
+    bpy.context.view_layer.objects.active = holes[0]
+    bpy.ops.object.join()
+    holes_obj = bpy.context.active_object
+
+    bpy.ops.object.mode_set(mode="EDIT")
+    hbm = bmesh.from_edit_mesh(holes_obj.data)
+    hbm.faces.ensure_lookup_table()
+    for f in hbm.faces:
+        f.select_set(False)
+    seedf = min((f for f in hbm.faces if len(f.verts) == 4),
+                key=lambda f: f.calc_center_median().x)
+    seedf.select_set(True)
+    hbm.faces.active = seedf
+    bmesh.update_edit_mesh(holes_obj.data)
+    bpy.ops.reverse.select_similar()              # grow to one cylinder wall
+    settings.primitive_type = "CYLINDER"
+    settings.segment_regions = False
+    bpy.ops.reverse.fit_selection()               # records the seed feature
+    bpy.ops.object.mode_set(mode="OBJECT")
+    bpy.context.scene.reverse.active_feature = len(feats) - 1
+    before_prop = len(feats)
+    if bpy.ops.reverse.propagate_pattern() != {"FINISHED"}:
+        fail("propagate_pattern failed")
+    made = len(feats) - before_prop
+    if made != 2:
+        fail(f"pattern propagation created {made} holes, expected 2")
+    print(f"[ok] pattern propagation found {made} matching holes from 1 seed")
+
     # Thread tagging (#12): set a thread spec on a cylinder feature; it must
     # round-trip onto the object and into the exported STEP.
     cyl_feat = next((f for f in feats if f.kind == "CYLINDER" and f.object_name), None)
