@@ -151,6 +151,25 @@ def main():
         fail("STEP file missing AP242 header")
     print(f"[ok] exported STEP for {n_reverse} Reverse objects → {os.path.basename(out)}")
 
+    # Overlay manager (INFRA-B): enable/disable must be leak-free — exactly one
+    # draw handler while active, none after clearing.
+    from reverse_mesh import overlay
+    tri = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+    col = [(1, 0, 0, 1)] * 3
+    overlay.set_tris("smoke:tris", tri, col)
+    overlay.set_lines("smoke:lines", [(0, 0, 0), (1, 1, 1)], [(0, 1, 0, 1)] * 2)
+    if sorted(overlay.active_keys()) != ["smoke:lines", "smoke:tris"]:
+        fail(f"overlay keys wrong: {overlay.active_keys()}")
+    if overlay._handle is None:
+        fail("draw handler not installed while overlays active")
+    overlay.clear("smoke:tris")
+    if overlay.active_keys() != ["smoke:lines"]:
+        fail("overlay clear(key) did not remove just one")
+    overlay.clear_all()
+    if overlay.active_keys() or overlay._handle is not None:
+        fail("overlay clear_all left state behind (handler leak)")
+    print("[ok] overlay manager enable/clear leak-free")
+
     reverse_mesh.unregister()
     print("[ok] unregistered")
     print("\nALL BLENDER SMOKE CHECKS PASSED")
