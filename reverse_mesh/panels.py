@@ -136,6 +136,8 @@ class REVERSE_PT_features(Panel):
                       icon="REMOVE" if item.operation == "SUBTRACT" else "ADD")
             if item.runner_up:
                 box.label(text=f"Auto: {item.runner_up}", icon="SHADERFX")
+            if item.kind in {"CYLINDER", "CONE"}:
+                box.prop(item, "thread_spec", icon="MOD_SCREW")
 
         box = layout.box()
         box.label(text="Export", icon="EXPORT")

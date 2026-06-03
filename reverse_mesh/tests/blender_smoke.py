@@ -232,6 +232,17 @@ def main():
         fail(f"reconcile rebuilt {len(feats)} features, expected {n_objs} objects")
     print(f"[ok] reconcile rebuilt {len(feats)} features from scene objects")
 
+    # Thread tagging (#12): set a thread spec on a cylinder feature; it must
+    # round-trip onto the object and into the exported STEP.
+    cyl_feat = next((f for f in feats if f.kind == "CYLINDER" and f.object_name), None)
+    if cyl_feat is None:
+        fail("no cylinder feature to thread-tag")
+    cyl_feat.thread_spec = "M8x1.25"               # fires the update callback
+    cyl_obj = bpy.data.objects.get(cyl_feat.object_name)
+    if cyl_obj["reverse"].get("thread_spec") != "M8x1.25":
+        fail("thread spec did not round-trip onto the object")
+    print("[ok] thread spec tagged and stored on object")
+
     # STEP export of everything fitted so far.
     out = os.path.join(os.path.dirname(__file__), "smoke_export.step")
     n_reverse = sum(1 for o in bpy.context.scene.objects if "reverse" in o)
