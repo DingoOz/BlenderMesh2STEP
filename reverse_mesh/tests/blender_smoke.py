@@ -111,6 +111,19 @@ def main():
     print(f"[ok] snapping stored exact radius {snapobj['reverse']['radius']}")
     settings.snap_enabled = False
 
+    # Fit-quality heatmap (#1): fitting with it on registers overlay geometry;
+    # switching it off clears the overlay.
+    from reverse_mesh import overlay as _ov
+    settings.show_heatmap = True
+    bpy.ops.reverse.fit_selection()
+    if not any(k.startswith("heatmap:") for k in _ov.active_keys()):
+        fail("heatmap on: no overlay was registered after a fit")
+    print(f"[ok] heatmap overlay registered ({len(_ov.active_keys())} key(s))")
+    settings.show_heatmap = False        # update callback clears it
+    if any(k.startswith("heatmap:") for k in _ov.active_keys()):
+        fail("heatmap off: overlay was not cleared")
+    print("[ok] heatmap cleared when toggled off")
+
     # Torus: whole-mesh fit through the same pipeline.
     bpy.ops.object.mode_set(mode="OBJECT")
     bpy.ops.mesh.primitive_torus_add(major_radius=5.0, minor_radius=1.2,

@@ -66,6 +66,7 @@ class REVERSE_PT_main(Panel):
         sub.enabled = settings.create_object
         sub.prop(settings, "segments")
         box.prop(settings, "tolerance")
+        box.prop(settings, "show_heatmap")
 
         box.prop(settings, "snap_enabled")
         snap = box.column(align=True)
