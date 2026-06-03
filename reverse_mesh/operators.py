@@ -106,16 +106,27 @@ class REVERSE_OT_fit_selection(Operator):
         obj = context.active_object
         return obj is not None and obj.type == "MESH" and obj.mode == "EDIT"
 
+    @staticmethod
+    def _format_candidates(cands):
+        """Compact 'winner-first' summary of AUTO candidates, e.g.
+        'CYLINDER 0% | SPHERE 0.4% | CONE 1.1%'."""
+        return " | ".join(f"{c['kind']} {c['rel_rms'] * 100:.2g}%" for c in cands[:4])
+
     def _fit_region(self, region, settings):
         kind = settings.primitive_type
-        result = fit_auto(region) if kind == "AUTO" else FITTERS[kind](region)
+        runner_up = ""
+        if kind == "AUTO":
+            result, cands = fit_auto(region, return_candidates=True)
+            runner_up = self._format_candidates(cands)
+        else:
+            result = FITTERS[kind](region)
         if result is not None and settings.snap_enabled:
             step = (settings.snap_step if settings.snap_preset == "CUSTOM"
                     else float(settings.snap_preset))
             snap_result(result, step=step)   # conservative snap tolerance (own default)
-        return result
+        return result, runner_up
 
-    def _record(self, context, settings, result, obj, build_objects):
+    def _record(self, context, settings, result, runner_up, obj, build_objects):
         """Build the clean object (optional) and append a feature entry."""
         op = settings.default_operation
         cut = settings.default_cut_mode
@@ -132,6 +143,7 @@ class REVERSE_OT_fit_selection(Operator):
         item.object_name = obj_name
         item.operation = op
         item.cut_mode = cut
+        item.runner_up = runner_up
         settings.active_feature = len(settings.features) - 1
 
     def execute(self, context):
@@ -172,9 +184,9 @@ class REVERSE_OT_fit_selection(Operator):
         for region in regions:
             if len(region.points) < 3:
                 continue
-            result = self._fit_region(region, settings)
+            result, runner_up = self._fit_region(region, settings)
             if result is not None:
-                self._record(context, settings, result, obj, settings.create_object)
+                self._record(context, settings, result, runner_up, obj, settings.create_object)
                 results.append(result)
 
         if settings.create_object:
