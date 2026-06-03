@@ -281,6 +281,46 @@ def main():
     except OSError:
         pass
 
+    # Fillet (#5): a 90° edge fillet exports as a trimmed cylindrical patch.
+    from reverse_mesh import step_export
+    fillet = [{"kind": "FILLET", "name": "fl", "params": {
+        "base": (0, 0, 0), "axis": (0, 0, 1), "ref": (1, 0, 0),
+        "radius": 1.0, "height": 4.0, "u_min": 0.0, "u_max": math.pi / 2}}]
+    expected_area = 1.0 * (math.pi / 2) * 4.0      # r · span · height
+
+    # OCCT-native path.
+    out_fl = os.path.join(os.path.dirname(__file__), "occ_fillet.step")
+    occ_export.export(fillet, out_fl, unit="MM")
+    rfl = STEPControl_Reader(); rfl.ReadFile(out_fl); rfl.TransferRoots(); shfl = rfl.OneShape()
+    nf = 0
+    e = TopExp_Explorer(shfl, TopAbs_FACE)
+    while e.More():
+        nf += 1; e.Next()
+    afl = GProp_GProps(); BRepGProp.SurfaceProperties_s(shfl, afl); area_fl = afl.Mass()
+    print(f"[info] OCCT fillet: faces={nf} area={area_fl:.3f} expected={expected_area:.3f}")
+    if shfl.IsNull() or nf < 1 or abs(area_fl - expected_area) > 0.05:
+        fail(f"OCCT fillet patch wrong (faces={nf}, area={area_fl:.3f})")
+    print("[ok] OCCT fillet: trimmed cylindrical patch, area correct")
+
+    # Pure-Python path: the hand-written trimmed face must re-read as valid.
+    out_flp = os.path.join(os.path.dirname(__file__), "py_fillet.step")
+    with open(out_flp, "w") as f:
+        f.write(step_export.build_step(fillet, unit="MM", product_name="Fillet"))
+    rflp = STEPControl_Reader()
+    if rflp.ReadFile(out_flp) != IFSelect_RetDone:
+        fail("pure-Python fillet did not re-read")
+    rflp.TransferRoots(); shflp = rflp.OneShape()
+    aflp = GProp_GProps(); BRepGProp.SurfaceProperties_s(shflp, aflp); area_p = aflp.Mass()
+    print(f"[info] pure-Python fillet: valid={BRepCheck_Analyzer(shflp).IsValid()} area={area_p:.3f}")
+    if shflp.IsNull() or not BRepCheck_Analyzer(shflp).IsValid() or abs(area_p - expected_area) > 0.05:
+        fail(f"pure-Python fillet patch invalid (area={area_p:.3f})")
+    print("[ok] pure-Python fillet: trimmed patch re-reads valid, area correct")
+    for f in (out_fl, out_flp):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+
     for f in (out, out2):
         try:
             os.remove(f)

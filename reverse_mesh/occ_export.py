@@ -445,6 +445,18 @@ def _make_shape(kind, p, gp_Pnt, gp_Dir, gp_Ax3, gp_Pln,
         pln = gp_Pln(gp_Ax3(gp_Pnt(*c), gp_Dir(*n), gp_Dir(*e1)))
         face = MakeFace(pln, -p["half_u"], p["half_u"], -p["half_v"], p["half_v"]).Face()
         return face, False
+    if kind == "FILLET":
+        # Trimmed cylindrical patch: u = arc angle [u_min, u_max], v = axial extent.
+        (Geom_CylindricalSurface,) = _imp("Geom", "Geom_CylindricalSurface")
+        axis = _unit(tuple(p["axis"]))
+        ref = _unit(tuple(p["ref"]))
+        base = tuple(float(c) for c in p["base"])
+        h = p["height"]
+        ax3 = gp_Ax3(gp_Pnt(*base), gp_Dir(*[float(c) for c in axis]),
+                     gp_Dir(*[float(c) for c in ref]))
+        surf = Geom_CylindricalSurface(ax3, p["radius"])
+        face = MakeFace(surf, p["u_min"], p["u_max"], -h / 2.0, h / 2.0, 1e-6).Face()
+        return face, False
     return None, False
 
 

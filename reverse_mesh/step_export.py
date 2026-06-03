@@ -242,6 +242,47 @@ def _cylinder_item(w, p):
                  f"{w.closed_shell([lateral, bot, top_f])})"), True
 
 
+def _fillet_item(w, p):
+    """Edge fillet → a *trimmed* partial cylindrical face (an open surface patch).
+
+    Bounded by two partial-circle arcs (at the axial ends) and two straight seams
+    (at the angular ends u_min/u_max), wrapped in a surface model like a plane.
+    """
+    axis = _unit(tuple(p["axis"]))
+    e1 = _unit(tuple(p["ref"]))
+    e2 = _unit(_cross(axis, e1))
+    r, h = p["radius"], p["height"]
+    u0, u1 = p["u_min"], p["u_max"]
+    base = tuple(p["base"])
+    c_bot = _sub(base, _scale(axis, h / 2.0))
+    c_top = _add(base, _scale(axis, h / 2.0))
+
+    def on_arc(center, u):
+        d = _add(_scale(e1, math.cos(u)), _scale(e2, math.sin(u)))
+        return _add(center, _scale(d, r))
+
+    pb0, pb1 = on_arc(c_bot, u0), on_arc(c_bot, u1)
+    pt0, pt1 = on_arc(c_top, u0), on_arc(c_top, u1)
+    vb0, vb1 = w.vertex(pb0), w.vertex(pb1)
+    vt0, vt1 = w.vertex(pt0), w.vertex(pt1)
+
+    arc_bot = w.edge_curve(vb0, vb1, w.circle(w.axis2(c_bot, axis, e1), r), True)
+    arc_top = w.edge_curve(vt0, vt1, w.circle(w.axis2(c_top, axis, e1), r), True)
+    seam0 = w.edge_curve(vb0, vt0, w.line(pb0, axis), True)
+    seam1 = w.edge_curve(vb1, vt1, w.line(pb1, axis), True)
+
+    surf = w.add(f"CYLINDRICAL_SURFACE('',{w.axis2(c_bot, axis, e1)},{_num(r)})")
+    loop = w.edge_loop([
+        w.oriented_edge(arc_bot, True),
+        w.oriented_edge(seam1, True),
+        w.oriented_edge(arc_top, False),
+        w.oriented_edge(seam0, False),
+    ])
+    face = w.advanced_face("fillet", [w.face_outer_bound(loop, True)], surf, True)
+    model = w.add(f"SHELL_BASED_SURFACE_MODEL('',({w.open_shell([face])}))")
+    return model, False
+
+
 def _cone_item(w, p):
     axis = _unit(tuple(p["axis"]))
     ref = _perp(axis)
@@ -413,6 +454,7 @@ _BUILDERS = {
     "CONE": _cone_item,
     "SPHERE": _sphere_item,
     "TORUS": _torus_item,
+    "FILLET": _fillet_item,
 }
 
 

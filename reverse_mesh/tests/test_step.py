@@ -9,6 +9,7 @@ counts solids — otherwise that step is skipped with a note.
     python3 tests/test_step.py
 """
 
+import math
 import os
 import re
 import sys
@@ -40,6 +41,9 @@ def _features():
         {"kind": "TORUS", "name": "t", "params": {
             "center": (50, 0, 0), "axis": (0, 0, 1), "major_radius": 5.0,
             "minor_radius": 1.5}},
+        {"kind": "FILLET", "name": "fl", "params": {     # 90° edge fillet patch
+            "base": (60, 0, 0), "axis": (0, 0, 1), "ref": (1, 0, 0),
+            "radius": 1.0, "height": 4.0, "u_min": 0.0, "u_max": math.pi / 2}},
     ]
 
 

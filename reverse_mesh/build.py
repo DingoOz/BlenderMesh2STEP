@@ -39,6 +39,8 @@ def build_object(context, result, segments: int = 48, operation: str = "ADD",
         verts, faces, matrix = _cone(p, segments)
     elif kind == "TORUS":
         verts, faces, matrix = _torus(p, segments)
+    elif kind == "FILLET":
+        verts, faces, matrix = _fillet(p, segments)
     else:
         raise ValueError(f"Unknown primitive kind: {kind}")
 
@@ -199,6 +201,28 @@ def _torus(p, segments):
             d = ((i + 1) % major_segs) * minor_segs + j
             faces.append((a, b, c, d))
     return verts, faces, _axis_matrix(p["axis"], p["center"])
+
+
+def _fillet(p, segments):
+    """A partial cylinder strip (the edge-fillet patch) in its local axis/ref frame."""
+    r, h = p["radius"], p["height"]
+    u0, u1 = p["u_min"], p["u_max"]
+    n = max(8, segments // 2)
+    bottom, top = [], []
+    for i in range(n + 1):
+        u = u0 + (u1 - u0) * i / n
+        x, y = r * math.cos(u), r * math.sin(u)
+        bottom.append((x, y, -h / 2.0))
+        top.append((x, y, h / 2.0))
+    verts = bottom + top
+    faces = [(i, i + 1, n + 1 + i + 1, n + 1 + i) for i in range(n)]
+    az = Vector(tuple(float(x) for x in p["axis"])).normalized()
+    e1 = Vector(tuple(float(x) for x in p["ref"]))
+    e1 = (e1 - e1.dot(az) * az).normalized()
+    e2 = az.cross(e1)
+    loc = Vector(tuple(float(x) for x in p["base"]))
+    rot = Matrix((e1, e2, az)).transposed().to_4x4()
+    return verts, faces, Matrix.Translation(loc) @ rot
 
 
 def _serialise_params(kind, p, result):

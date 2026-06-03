@@ -22,6 +22,7 @@ PRIMITIVE_ITEMS = [
     ("CONE", "Cone", "Conical / tapered face (experimental)", "MESH_CONE", 3),
     ("SPHERE", "Sphere", "Spherical face", "MESH_UVSPHERE", 4),
     ("TORUS", "Torus", "Toroidal face / ring (best on full rings)", "MESH_TORUS", 5),
+    ("FILLET", "Fillet", "Edge fillet / round → a trimmed partial cylinder", "MOD_BEVEL", 7),
 ]
 
 
