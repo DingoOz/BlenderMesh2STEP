@@ -36,6 +36,8 @@ class ReverseFeature(PropertyGroup):
     operation: StringProperty(name="Operation", default="ADD")
     cut_mode: StringProperty(name="Cut mode", default="THROUGH")
     runner_up: StringProperty(name="Runner-ups")   # AUTO tie-break, e.g. "CYLINDER 0% | SPHERE 0.4%"
+    source_object: StringProperty(name="Source object")   # mesh the feature was fit from
+    source_faces: StringProperty(name="Source faces")     # comma-joined face indices (for re-fit)
 
 
 class ReverseSettings(PropertyGroup):

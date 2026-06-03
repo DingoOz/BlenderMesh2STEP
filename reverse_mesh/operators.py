@@ -10,13 +10,14 @@ import sys
 import bmesh
 import bpy
 import numpy as np
+from bpy.app.handlers import persistent
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, StringProperty
 from bpy.types import Operator
 from bpy_extras.io_utils import ExportHelper
 from mathutils import Matrix, Vector
 
 from . import build, occ_export, step_export
-from .fitting import FITTERS, Region, fit_auto, snap_result
+from .fitting import FITTERS, Region, fit_auto, snap_result, summarize
 
 
 def occt_lib_dir(create=False):
@@ -126,7 +127,8 @@ class REVERSE_OT_fit_selection(Operator):
             snap_result(result, step=step)   # conservative snap tolerance (own default)
         return result, runner_up
 
-    def _record(self, context, settings, result, runner_up, obj, build_objects):
+    def _record(self, context, settings, result, runner_up, obj, build_objects,
+                source_faces=""):
         """Build the clean object (optional) and append a feature entry."""
         op = settings.default_operation
         cut = settings.default_cut_mode
@@ -144,6 +146,8 @@ class REVERSE_OT_fit_selection(Operator):
         item.operation = op
         item.cut_mode = cut
         item.runner_up = runner_up
+        item.source_object = obj.name
+        item.source_faces = source_faces
         settings.active_feature = len(settings.features) - 1
 
     def execute(self, context):
@@ -163,7 +167,10 @@ class REVERSE_OT_fit_selection(Operator):
         else:
             clusters = [faces]
 
+        # Capture geometry AND the source face indices now, while the edit-mode
+        # bmesh is still valid (we leave Edit Mode below to build clean objects).
         regions = [_region_from_faces(c, mw, nmat) for c in clusters]
+        cluster_faces = [",".join(str(f.index) for f in c) for c in clusters]
 
         # In single-fit mode, warn if the selection clearly spans several surfaces.
         if not settings.segment_regions:
@@ -181,12 +188,13 @@ class REVERSE_OT_fit_selection(Operator):
             bpy.ops.object.mode_set(mode="OBJECT")
 
         results = []
-        for region in regions:
+        for region, src_faces in zip(regions, cluster_faces):
             if len(region.points) < 3:
                 continue
             result, runner_up = self._fit_region(region, settings)
             if result is not None:
-                self._record(context, settings, result, runner_up, obj, settings.create_object)
+                self._record(context, settings, result, runner_up, obj,
+                             settings.create_object, source_faces=src_faces)
                 results.append(result)
 
         if settings.create_object:
@@ -260,6 +268,133 @@ class REVERSE_OT_clear_features(Operator):
     def execute(self, context):
         context.scene.reverse.features.clear()
         context.scene.reverse.active_feature = 0
+        return {"FINISHED"}
+
+
+class REVERSE_OT_move_feature(Operator):
+    """Move the active feature up or down in the list"""
+
+    bl_idname = "reverse.move_feature"
+    bl_label = "Move Feature"
+    bl_options = {"REGISTER", "UNDO"}
+
+    direction: EnumProperty(
+        items=[("UP", "Up", ""), ("DOWN", "Down", "")], default="UP",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        s = context.scene.reverse
+        return len(s.features) > 1 and 0 <= s.active_feature < len(s.features)
+
+    def execute(self, context):
+        s = context.scene.reverse
+        i = s.active_feature
+        j = i - 1 if self.direction == "UP" else i + 1
+        if not (0 <= j < len(s.features)):
+            return {"CANCELLED"}
+        s.features.move(i, j)
+        s.active_feature = j
+        return {"FINISHED"}
+
+
+class REVERSE_OT_remove_feature(Operator):
+    """Remove the active feature from the list and delete its clean object"""
+
+    bl_idname = "reverse.remove_feature"
+    bl_label = "Remove Feature"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        s = context.scene.reverse
+        return 0 <= s.active_feature < len(s.features)
+
+    def execute(self, context):
+        s = context.scene.reverse
+        i = s.active_feature
+        name = s.features[i].object_name
+        obj = bpy.data.objects.get(name) if name else None
+        if obj is not None:
+            bpy.data.objects.remove(obj, do_unlink=True)
+        s.features.remove(i)
+        s.active_feature = min(i, len(s.features) - 1)
+        return {"FINISHED"}
+
+
+class REVERSE_OT_refit_feature(Operator):
+    """Re-fit the active feature from its original faces (rebuilds its object)
+
+    Best-effort: re-selects the stored source faces on the source mesh and runs
+    the same primitive fit again, so a feature can be regenerated after the fit
+    settings change. Brittle if the source mesh topology has since changed.
+    """
+
+    bl_idname = "reverse.refit_feature"
+    bl_label = "Re-fit Feature"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        s = context.scene.reverse
+        if not (0 <= s.active_feature < len(s.features)):
+            return False
+        f = s.features[s.active_feature]
+        return bool(f.source_object and f.source_faces
+                    and bpy.data.objects.get(f.source_object))
+
+    def execute(self, context):
+        s = context.scene.reverse
+        feat = s.features[s.active_feature]
+        src = bpy.data.objects.get(feat.source_object)
+        if src is None or src.type != "MESH":
+            self.report({"WARNING"}, "Source mesh is gone — cannot re-fit")
+            return {"CANCELLED"}
+        try:
+            indices = [int(i) for i in feat.source_faces.split(",") if i != ""]
+        except ValueError:
+            self.report({"WARNING"}, "Stored source faces are unreadable")
+            return {"CANCELLED"}
+
+        if context.object and context.object.mode == "EDIT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+        bpy.ops.object.select_all(action="DESELECT")
+        src.select_set(True)
+        context.view_layer.objects.active = src
+        bpy.ops.object.mode_set(mode="EDIT")
+        bm = bmesh.from_edit_mesh(src.data)
+        bm.faces.ensure_lookup_table()
+        faces = [bm.faces[i] for i in indices if 0 <= i < len(bm.faces)]
+        if not faces:
+            bpy.ops.object.mode_set(mode="OBJECT")
+            self.report({"WARNING"}, "None of the source faces still exist")
+            return {"CANCELLED"}
+
+        mw = src.matrix_world
+        nmat = mw.to_3x3().inverted_safe().transposed()
+        region = _region_from_faces(faces, mw, nmat)
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+        kind = feat.kind
+        result = fit_auto(region) if kind == "AUTO" else FITTERS[kind](region)
+        if result is None:
+            self.report({"WARNING"}, "Re-fit produced no primitive")
+            return {"CANCELLED"}
+        if s.snap_enabled:
+            step = s.snap_step if s.snap_preset == "CUSTOM" else float(s.snap_preset)
+            snap_result(result, step=step)
+
+        old = bpy.data.objects.get(feat.object_name) if feat.object_name else None
+        new_obj = build.build_object(context, result, s.segments,
+                                     operation=feat.operation, cut_mode=feat.cut_mode)
+        if old is not None:
+            bpy.data.objects.remove(old, do_unlink=True)
+        feat.object_name = new_obj.name
+        feat.kind = result.kind
+        feat.summary = result.summary
+        feat.rms = result.rms
+        feat.max_error = result.max_error
+        self.report({"INFO"}, f"Re-fitted {result.kind} · RMS {result.rms:.4g}")
         return {"FINISHED"}
 
 
@@ -596,9 +731,51 @@ def menu_export(self, context):
     self.layout.operator(REVERSE_OT_export_step.bl_idname, text="Reverse STEP (AP242) (.step)")
 
 
+def _reconcile_scene(scene):
+    """Sync a scene's feature list with the objects that carry ``["reverse"]``.
+
+    Drops features whose clean object no longer exists, and adds a feature for
+    every Reverse object missing from the list — so the stack survives save/reload
+    and picks up objects appended from another file.
+    """
+    s = getattr(scene, "reverse", None)
+    if s is None:
+        return
+    for i in range(len(s.features) - 1, -1, -1):
+        name = s.features[i].object_name
+        if name and bpy.data.objects.get(name) is None:
+            s.features.remove(i)
+    known = {f.object_name for f in s.features if f.object_name}
+    for o in scene.objects:
+        if o.type != "MESH" or "reverse" not in o or o.name in known:
+            continue
+        data = o["reverse"]
+        item = s.features.add()
+        item.kind = data.get("kind", "")
+        item.object_name = o.name
+        item.operation = data.get("op", "ADD")
+        item.cut_mode = data.get("cut", "THROUGH")
+        item.rms = float(data.get("rms", 0.0))
+        item.max_error = float(data.get("max_error", 0.0))
+        try:
+            item.summary = summarize(item.kind, {k: data[k] for k in data.keys()})
+        except (KeyError, TypeError, ValueError):
+            item.summary = item.kind
+    s.active_feature = min(s.active_feature, max(0, len(s.features) - 1))
+
+
+@persistent
+def _reconcile_features(_dummy):
+    for scene in bpy.data.scenes:
+        _reconcile_scene(scene)
+
+
 classes = (
     REVERSE_OT_fit_selection,
     REVERSE_OT_select_similar,
+    REVERSE_OT_move_feature,
+    REVERSE_OT_remove_feature,
+    REVERSE_OT_refit_feature,
     REVERSE_OT_clear_features,
     REVERSE_OT_set_operation,
     REVERSE_OT_set_cut_mode,
@@ -613,9 +790,13 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.TOPBAR_MT_file_export.append(menu_export)
+    if _reconcile_features not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_reconcile_features)
 
 
 def unregister():
+    if _reconcile_features in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_reconcile_features)
     bpy.types.TOPBAR_MT_file_export.remove(menu_export)
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

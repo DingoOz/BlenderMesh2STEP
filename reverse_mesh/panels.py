@@ -87,12 +87,20 @@ class REVERSE_PT_features(Panel):
         layout = self.layout
         settings = context.scene.reverse
 
-        layout.template_list(
+        list_row = layout.row()
+        list_row.template_list(
             "REVERSE_UL_features", "",
             settings, "features",
             settings, "active_feature",
             rows=4,
         )
+        # Reorder / re-fit / delete the stack — non-destructive editing column.
+        col = list_row.column(align=True)
+        col.operator("reverse.move_feature", text="", icon="TRIA_UP").direction = "UP"
+        col.operator("reverse.move_feature", text="", icon="TRIA_DOWN").direction = "DOWN"
+        col.separator()
+        col.operator("reverse.refit_feature", text="", icon="FILE_REFRESH")
+        col.operator("reverse.remove_feature", text="", icon="X")
 
         row = layout.row(align=True)
         row.operator("reverse.set_operation", text="Add", icon="ADD").operation = "ADD"
