@@ -161,6 +161,17 @@ class StepWriter:
 
 # --- per-primitive solids -----------------------------------------------------
 
+def _solid_name(base, p):
+    """A solid's STEP name, annotated with a thread spec when one is tagged.
+
+    The name is what CAD shows for the solid, so 'cylinder thread M8x1.25' makes
+    the thread visible without needing full AP242 semantic thread features.
+    """
+    spec = p.get("thread_spec")
+    name = f"{base} thread {spec}" if spec else base
+    return name.replace("'", "''")
+
+
 def _full_circle_edge(w, center, axis, ref, radius):
     """A closed circular edge (one vertex, start == end). Returns (edge, vertex)."""
     start = _add(center, _scale(ref, radius))
@@ -227,7 +238,8 @@ def _cylinder_item(w, p):
     top_f = w.advanced_face("cap", [w.face_outer_bound(
         w.edge_loop([w.oriented_edge(e_top, True)]), True)], pl_top, True)
 
-    return w.add(f"MANIFOLD_SOLID_BREP('cylinder',{w.closed_shell([lateral, bot, top_f])})"), True
+    return w.add(f"MANIFOLD_SOLID_BREP('{_solid_name('cylinder', p)}',"
+                 f"{w.closed_shell([lateral, bot, top_f])})"), True
 
 
 def _cone_item(w, p):
@@ -285,7 +297,7 @@ def _cone_item(w, p):
             w.edge_loop([w.oriented_edge(e_top, True)]), True)], pl_top, True)
         shell = w.closed_shell([lateral, bot, top_f])
 
-    return w.add(f"MANIFOLD_SOLID_BREP('cone',{shell})"), True
+    return w.add(f"MANIFOLD_SOLID_BREP('{_solid_name('cone', p)}',{shell})"), True
 
 
 def _sphere_item(w, p):

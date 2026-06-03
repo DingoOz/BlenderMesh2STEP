@@ -27,7 +27,8 @@ def _features():
             "center": (5, 5, 5), "ax": (1, 0, 0), "ay": (0, 1, 0), "az": (0, 0, 1),
             "hx": 2.0, "hy": 3.0, "hz": 4.0}},
         {"kind": "CYLINDER", "name": "c", "params": {
-            "base": (10, 0, 0), "axis": (0, 0, 1), "radius": 2.0, "height": 6.0}},
+            "base": (10, 0, 0), "axis": (0, 0, 1), "radius": 2.0, "height": 6.0,
+            "thread_spec": "M8x1.25"}},
         {"kind": "CONE", "name": "cn", "params": {
             "base": (20, 0, 0), "axis": (0, 0, 1), "radius1": 3.0, "radius2": 1.0,
             "height": 5.0}},
@@ -55,6 +56,7 @@ def main():
     check("footer", text.rstrip().endswith("END-ISO-10303-21;"))
     check("ap242 schema", se.AP242_SCHEMA in text)
     check("has DATA/ENDSEC", "DATA;" in text and "ENDSEC;" in text)
+    check("thread annotation", "M8x1.25" in text and "thread M8x1.25" in text)
 
     # Every referenced #id must be defined exactly once.
     defined = set(re.findall(r"^#(\d+)=", text, re.MULTILINE))

@@ -25,6 +25,17 @@ PRIMITIVE_ITEMS = [
 ]
 
 
+def _on_thread_update(self, context):
+    # Mirror the thread spec onto the feature's object so it round-trips to STEP.
+    obj = bpy.data.objects.get(self.object_name) if self.object_name else None
+    if obj is None or "reverse" not in obj:
+        return
+    if self.thread_spec:
+        obj["reverse"]["thread_spec"] = self.thread_spec
+    elif "thread_spec" in obj["reverse"]:
+        del obj["reverse"]["thread_spec"]
+
+
 def _on_heatmap_toggle(self, context):
     # Clear any drawn heatmap when the user switches it off (it rebuilds on the
     # next fit). Imported lazily to avoid a module-load cycle.
@@ -46,6 +57,9 @@ class ReverseFeature(PropertyGroup):
     runner_up: StringProperty(name="Runner-ups")   # AUTO tie-break, e.g. "CYLINDER 0% | SPHERE 0.4%"
     source_object: StringProperty(name="Source object")   # mesh the feature was fit from
     source_faces: StringProperty(name="Source faces")     # comma-joined face indices (for re-fit)
+    thread_spec: StringProperty(                          # e.g. "M8x1.25"; annotates STEP
+        name="Thread", description="Thread designation for this hole/shaft (e.g. M8x1.25)",
+        update=_on_thread_update)
 
 
 class ReverseSettings(PropertyGroup):
