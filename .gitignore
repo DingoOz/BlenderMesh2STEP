@@ -6,9 +6,15 @@ __pycache__/
 # Build / release artifacts
 /dist/
 
+# Local OCCT test virtualenv / target install (kernel-path tests; not shipped)
+/.occ-venv/
+/.occ-blender/
+
 # Test outputs
 *.step
 *.stp
+*.pmi.json
+*.pmi.csv
 
 # Editor / OS
 .DS_Store

@@ -135,6 +135,50 @@ def fit_circle_2d(uv: np.ndarray) -> tuple[np.ndarray, float, np.ndarray]:
     return center, radius, radial
 
 
+# Snapping is deliberately tighter than the fit-warning tolerance: only round a
+# dimension that is *already* essentially a nice number (tessellation rounding),
+# never a genuine 17.3.
+SNAP_REL_TOLERANCE = 0.01
+
+
+def snap_value(x, step=None, preferred=None, rel_tol=SNAP_REL_TOLERANCE):
+    """Snap a fitted dimension to a 'nice' value when it's already very close.
+
+    Mesh tessellation biases fitted radii/lengths slightly (e.g. 19.98 mm for a
+    20 mm hole). With ``preferred`` (a list of allowed values) snap to the nearest
+    entry; otherwise snap to the nearest positive multiple of ``step``. Snapping
+    is *conservative*: it only fires when the candidate is within ``rel_tol`` of
+    the candidate itself, so a genuine 17.3 mm dimension is left alone. Returns
+    ``(value, changed)``.
+    """
+    if x is None or not np.isfinite(x):
+        return x, False
+    ax = abs(float(x))
+    if preferred:
+        cand = min((float(v) for v in preferred), key=lambda v: abs(ax - v))
+    elif step and step > 0:
+        cand = round(ax / step) * step
+    else:
+        return x, False
+    if cand <= 0:
+        return x, False
+    if 0 < abs(ax - cand) <= rel_tol * cand:
+        return float(np.copysign(cand, x)), True
+    return x, False
+
+
+def deviation_color(t, alpha=0.6):
+    """Map a normalised deviation ``t`` (0 = on-surface) to a green→yellow→red RGBA.
+
+    ``t`` is clamped to ``[0, 1]``; 0 is green (a face that fits), 1 is red (a face
+    that deviates by the full tolerance). Used by the fit-quality heatmap overlay.
+    """
+    t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else float(t)
+    if t < 0.5:
+        return (2.0 * t, 1.0, 0.0, alpha)          # green → yellow
+    return (1.0, 2.0 * (1.0 - t), 0.0, alpha)      # yellow → red
+
+
 def _unit(v: np.ndarray) -> np.ndarray:
     n = float(np.linalg.norm(v))
     return v / n if n > 1e-12 else v

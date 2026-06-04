@@ -10,13 +10,18 @@ import sys
 import bmesh
 import bpy
 import numpy as np
+from bpy.app.handlers import persistent
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, StringProperty
 from bpy.types import Operator
 from bpy_extras.io_utils import ExportHelper
 from mathutils import Matrix, Vector
 
-from . import build, occ_export, step_export
-from .fitting import FITTERS, Region, fit_auto
+from . import build, occ_export, overlay, pmi_export, step_export
+from .fitting import (
+    FITTERS, Region, classify_arrangement, fit_auto, fit_fillet, fit_robust,
+    match_cylinders, signed_distances, snap_result, summarize,
+)
+from .fitting.common import deviation_color
 
 
 def occt_lib_dir(create=False):
@@ -53,6 +58,63 @@ def _selected_faces(obj):
     return [f for f in bmesh.from_edit_mesh(obj.data).faces if f.select]
 
 
+def _face_tris_world(face, mw):
+    """Fan-triangulate a bmesh face into world-space (x, y, z) vertex triples."""
+    vs = [mw @ v.co for v in face.verts]
+    return [(tuple(vs[0]), tuple(vs[i]), tuple(vs[i + 1]))
+            for i in range(1, len(vs) - 1)]
+
+
+def _add_feature(context, settings, result, src_obj, *, build_object, operation,
+                 cut, runner_up="", source_faces=""):
+    """Build the optional clean object and append a feature entry; return the item.
+
+    Shared by the fit operator and pattern propagation (which supplies the seed's
+    role/cut instead of the scene defaults)."""
+    obj_name = ""
+    if build_object:
+        new_obj = build.build_object(context, result, settings.segments,
+                                     operation=operation, cut_mode=cut)
+        obj_name = new_obj.name
+    item = settings.features.add()
+    item.kind = result.kind
+    item.summary = result.summary
+    item.rms = result.rms
+    item.max_error = result.max_error
+    item.object_name = obj_name
+    item.operation = operation
+    item.cut_mode = cut
+    item.runner_up = runner_up
+    item.source_object = src_obj.name
+    item.source_faces = source_faces
+    settings.active_feature = len(settings.features) - 1
+    return item
+
+
+def _grow_region(seed, pool, angle_threshold_rad, visited=None):
+    """Flood-fill a smooth-connected region of faces outward from ``seed``.
+
+    Crosses an edge only to a face that is in ``pool`` and whose normal is within
+    ``angle_threshold_rad`` of the current face's. ``visited`` (a set) is updated
+    in place, so a caller can segment a whole pool by reusing it across seeds.
+    """
+    if visited is None:
+        visited = set()
+    region = [seed]
+    visited.add(seed)
+    stack = [seed]
+    while stack:
+        f = stack.pop()
+        for edge in f.edges:
+            for nf in edge.link_faces:
+                if nf in pool and nf not in visited:
+                    if f.normal.angle(nf.normal, math.pi) <= angle_threshold_rad:
+                        visited.add(nf)
+                        region.append(nf)
+                        stack.append(nf)
+    return region
+
+
 def _segment_faces(faces, angle_threshold_rad):
     """Group selected faces into smooth-connected regions.
 
@@ -66,19 +128,7 @@ def _segment_faces(faces, angle_threshold_rad):
     for seed in faces:
         if seed in visited:
             continue
-        region = [seed]
-        visited.add(seed)
-        stack = [seed]
-        while stack:
-            f = stack.pop()
-            for edge in f.edges:
-                for nf in edge.link_faces:
-                    if nf in selected and nf not in visited:
-                        if f.normal.angle(nf.normal, math.pi) <= angle_threshold_rad:
-                            visited.add(nf)
-                            region.append(nf)
-                            stack.append(nf)
-        regions.append(region)
+        regions.append(_grow_region(seed, selected, angle_threshold_rad, visited))
     return regions
 
 
@@ -94,28 +144,57 @@ class REVERSE_OT_fit_selection(Operator):
         obj = context.active_object
         return obj is not None and obj.type == "MESH" and obj.mode == "EDIT"
 
+    @staticmethod
+    def _format_candidates(cands):
+        """Compact 'winner-first' summary of AUTO candidates, e.g.
+        'CYLINDER 0% | SPHERE 0.4% | CONE 1.1%'."""
+        return " | ".join(f"{c['kind']} {c['rel_rms'] * 100:.2g}%" for c in cands[:4])
+
     def _fit_region(self, region, settings):
         kind = settings.primitive_type
-        return fit_auto(region) if kind == "AUTO" else FITTERS[kind](region)
+        runner_up = ""
+        if kind == "FILLET":
+            result = fit_fillet(region)
+        elif kind == "AUTO":
+            result, cands = fit_auto(region, return_candidates=True)
+            runner_up = self._format_candidates(cands)
+            if result is not None and settings.use_ransac:
+                # Keep AUTO's chosen kind, but refit it robustly to drop outliers.
+                result = fit_robust(region, FITTERS[result.kind],
+                                    rel_threshold=settings.ransac_threshold) or result
+        elif settings.use_ransac:
+            result = fit_robust(region, FITTERS[kind],
+                                rel_threshold=settings.ransac_threshold)
+        else:
+            result = FITTERS[kind](region)
+        if result is not None and settings.snap_enabled:
+            step = (settings.snap_step if settings.snap_preset == "CUSTOM"
+                    else float(settings.snap_preset))
+            snap_result(result, step=step)   # conservative snap tolerance (own default)
+        return result, runner_up
 
-    def _record(self, context, settings, result, obj, build_objects):
+    @staticmethod
+    def _push_heatmap(settings, region, result, geo, idx):
+        """Colour each selected face by its deviation from the fitted surface."""
+        dev = np.abs(signed_distances(result, region.face_points))
+        scale = result.params.get("_scale", 1.0) or 1.0
+        denom = max(settings.tolerance * scale, 1e-12)   # red at one tolerance off
+        coords, colors = [], []
+        for face_tris, d in zip(geo, dev):
+            col = deviation_color(d / denom)
+            for tri in face_tris:
+                for v in tri:
+                    coords.append(v)
+                    colors.append(col)
+        if coords:
+            overlay.set_tris(f"heatmap:{idx}", coords, colors)
+
+    def _record(self, context, settings, result, runner_up, obj, build_objects,
+                source_faces=""):
         """Build the clean object (optional) and append a feature entry."""
-        op = settings.default_operation
-        cut = settings.default_cut_mode
-        obj_name = ""
-        if build_objects:
-            new_obj = build.build_object(context, result, settings.segments,
-                                         operation=op, cut_mode=cut)
-            obj_name = new_obj.name
-        item = settings.features.add()
-        item.kind = result.kind
-        item.summary = result.summary
-        item.rms = result.rms
-        item.max_error = result.max_error
-        item.object_name = obj_name
-        item.operation = op
-        item.cut_mode = cut
-        settings.active_feature = len(settings.features) - 1
+        _add_feature(context, settings, result, obj, build_object=build_objects,
+                     operation=settings.default_operation, cut=settings.default_cut_mode,
+                     runner_up=runner_up, source_faces=source_faces)
 
     def execute(self, context):
         settings = context.scene.reverse
@@ -134,7 +213,13 @@ class REVERSE_OT_fit_selection(Operator):
         else:
             clusters = [faces]
 
+        # Capture geometry AND the source face indices now, while the edit-mode
+        # bmesh is still valid (we leave Edit Mode below to build clean objects).
+        # cluster_geo holds each face's world-space fan triangles (for the heatmap),
+        # in the same face order as the region's face_points.
         regions = [_region_from_faces(c, mw, nmat) for c in clusters]
+        cluster_faces = [",".join(str(f.index) for f in c) for c in clusters]
+        cluster_geo = [[_face_tris_world(f, mw) for f in c] for c in clusters]
 
         # In single-fit mode, warn if the selection clearly spans several surfaces.
         if not settings.segment_regions:
@@ -151,14 +236,20 @@ class REVERSE_OT_fit_selection(Operator):
         if settings.create_object:
             bpy.ops.object.mode_set(mode="OBJECT")
 
+        # Refresh the deviation heatmap: drop any previous overlay first.
+        overlay.clear_prefix("heatmap:")
+
         results = []
-        for region in regions:
+        for region, src_faces, geo in zip(regions, cluster_faces, cluster_geo):
             if len(region.points) < 3:
                 continue
-            result = self._fit_region(region, settings)
+            result, runner_up = self._fit_region(region, settings)
             if result is not None:
-                self._record(context, settings, result, obj, settings.create_object)
+                self._record(context, settings, result, runner_up, obj,
+                             settings.create_object, source_faces=src_faces)
                 results.append(result)
+                if settings.show_heatmap:
+                    self._push_heatmap(settings, region, result, geo, len(results) - 1)
 
         if settings.create_object:
             bpy.ops.object.mode_set(mode=prev_mode)
@@ -180,6 +271,47 @@ class REVERSE_OT_fit_selection(Operator):
         return {"FINISHED"}
 
 
+class REVERSE_OT_select_similar(Operator):
+    """Grow the selection to the whole surface around the active face
+
+    Flood-fills from the active (or first selected) face across the whole mesh,
+    following gently-curving neighbours and stopping at sharp creases — so one
+    click on a cylinder wall selects the entire wall, but not its end caps.
+    """
+
+    bl_idname = "reverse.select_similar"
+    bl_label = "Select Similar Surface"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and obj.type == "MESH" and obj.mode == "EDIT"
+
+    def execute(self, context):
+        settings = context.scene.reverse
+        obj = context.active_object
+        bm = bmesh.from_edit_mesh(obj.data)
+        bm.faces.ensure_lookup_table()
+
+        seed = bm.faces.active
+        if seed is None or not seed.select:
+            seed = next((f for f in bm.faces if f.select), None)
+        if seed is None:
+            self.report({"WARNING"}, "Select a face to grow the surface from")
+            return {"CANCELLED"}
+
+        pool = set(bm.faces)
+        region = _grow_region(seed, pool, math.radians(settings.select_similar_angle))
+        for f in region:
+            f.select_set(True)        # also selects the face's own verts/edges
+        # NB: don't select_flush(True) — flushing selection *up* would re-select a
+        # cap whose every vertex is shared with the (now-selected) wall quads.
+        bmesh.update_edit_mesh(obj.data)
+        self.report({"INFO"}, f"Selected {len(region)} faces in the surface")
+        return {"FINISHED"}
+
+
 class REVERSE_OT_clear_features(Operator):
     """Clear the session feature list (does not delete created objects)"""
 
@@ -190,6 +322,227 @@ class REVERSE_OT_clear_features(Operator):
     def execute(self, context):
         context.scene.reverse.features.clear()
         context.scene.reverse.active_feature = 0
+        return {"FINISHED"}
+
+
+class REVERSE_OT_move_feature(Operator):
+    """Move the active feature up or down in the list"""
+
+    bl_idname = "reverse.move_feature"
+    bl_label = "Move Feature"
+    bl_options = {"REGISTER", "UNDO"}
+
+    direction: EnumProperty(
+        items=[("UP", "Up", ""), ("DOWN", "Down", "")], default="UP",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        s = context.scene.reverse
+        return len(s.features) > 1 and 0 <= s.active_feature < len(s.features)
+
+    def execute(self, context):
+        s = context.scene.reverse
+        i = s.active_feature
+        j = i - 1 if self.direction == "UP" else i + 1
+        if not (0 <= j < len(s.features)):
+            return {"CANCELLED"}
+        s.features.move(i, j)
+        s.active_feature = j
+        return {"FINISHED"}
+
+
+class REVERSE_OT_remove_feature(Operator):
+    """Remove the active feature from the list and delete its clean object"""
+
+    bl_idname = "reverse.remove_feature"
+    bl_label = "Remove Feature"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        s = context.scene.reverse
+        return 0 <= s.active_feature < len(s.features)
+
+    def execute(self, context):
+        s = context.scene.reverse
+        i = s.active_feature
+        name = s.features[i].object_name
+        obj = bpy.data.objects.get(name) if name else None
+        if obj is not None:
+            bpy.data.objects.remove(obj, do_unlink=True)
+        s.features.remove(i)
+        s.active_feature = min(i, len(s.features) - 1)
+        return {"FINISHED"}
+
+
+class REVERSE_OT_refit_feature(Operator):
+    """Re-fit the active feature from its original faces (rebuilds its object)
+
+    Best-effort: re-selects the stored source faces on the source mesh and runs
+    the same primitive fit again, so a feature can be regenerated after the fit
+    settings change. Brittle if the source mesh topology has since changed.
+    """
+
+    bl_idname = "reverse.refit_feature"
+    bl_label = "Re-fit Feature"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        s = context.scene.reverse
+        if not (0 <= s.active_feature < len(s.features)):
+            return False
+        f = s.features[s.active_feature]
+        return bool(f.source_object and f.source_faces
+                    and bpy.data.objects.get(f.source_object))
+
+    def execute(self, context):
+        s = context.scene.reverse
+        feat = s.features[s.active_feature]
+        src = bpy.data.objects.get(feat.source_object)
+        if src is None or src.type != "MESH":
+            self.report({"WARNING"}, "Source mesh is gone — cannot re-fit")
+            return {"CANCELLED"}
+        try:
+            indices = [int(i) for i in feat.source_faces.split(",") if i != ""]
+        except ValueError:
+            self.report({"WARNING"}, "Stored source faces are unreadable")
+            return {"CANCELLED"}
+
+        if context.object and context.object.mode == "EDIT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+        bpy.ops.object.select_all(action="DESELECT")
+        src.select_set(True)
+        context.view_layer.objects.active = src
+        bpy.ops.object.mode_set(mode="EDIT")
+        bm = bmesh.from_edit_mesh(src.data)
+        bm.faces.ensure_lookup_table()
+        faces = [bm.faces[i] for i in indices if 0 <= i < len(bm.faces)]
+        if not faces:
+            bpy.ops.object.mode_set(mode="OBJECT")
+            self.report({"WARNING"}, "None of the source faces still exist")
+            return {"CANCELLED"}
+
+        mw = src.matrix_world
+        nmat = mw.to_3x3().inverted_safe().transposed()
+        region = _region_from_faces(faces, mw, nmat)
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+        kind = feat.kind
+        result = fit_auto(region) if kind == "AUTO" else FITTERS[kind](region)
+        if result is None:
+            self.report({"WARNING"}, "Re-fit produced no primitive")
+            return {"CANCELLED"}
+        if s.snap_enabled:
+            step = s.snap_step if s.snap_preset == "CUSTOM" else float(s.snap_preset)
+            snap_result(result, step=step)
+
+        old = bpy.data.objects.get(feat.object_name) if feat.object_name else None
+        new_obj = build.build_object(context, result, s.segments,
+                                     operation=feat.operation, cut_mode=feat.cut_mode)
+        if old is not None:
+            bpy.data.objects.remove(old, do_unlink=True)
+        feat.object_name = new_obj.name
+        feat.kind = result.kind
+        feat.summary = result.summary
+        feat.rms = result.rms
+        feat.max_error = result.max_error
+        self.report({"INFO"}, f"Re-fitted {result.kind} · RMS {result.rms:.4g}")
+        return {"FINISHED"}
+
+
+class REVERSE_OT_propagate_pattern(Operator):
+    """Find and fit every hole matching the active one across the whole mesh
+
+    From a seed cylinder (e.g. one hole of a bolt circle), this segments the
+    source mesh, fits each region, and recovers every other cylinder with the
+    same radius and a parallel axis — fitting them with the seed's role/cut. It
+    also reports the arrangement (circular, linear, scattered).
+    """
+
+    bl_idname = "reverse.propagate_pattern"
+    bl_label = "Propagate Pattern"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        s = context.scene.reverse
+        if not (0 <= s.active_feature < len(s.features)):
+            return False
+        f = s.features[s.active_feature]
+        return f.kind == "CYLINDER" and bool(f.source_object) and \
+            bpy.data.objects.get(f.source_object) is not None
+
+    def execute(self, context):
+        s = context.scene.reverse
+        feat = s.features[s.active_feature]
+        src = bpy.data.objects.get(feat.source_object)
+        seed_obj = bpy.data.objects.get(feat.object_name) if feat.object_name else None
+        if src is None or seed_obj is None or "reverse" not in seed_obj:
+            self.report({"WARNING"}, "Seed feature's mesh/object is gone")
+            return {"CANCELLED"}
+
+        seed = _feature_from_object(seed_obj, 1.0)["params"]
+        seed_cyl = {"radius": seed["radius"], "axis": seed["axis"],
+                    "center": seed["base"], "height": seed["height"]}
+        seed_center = np.array(seed["base"])
+        seed_r = seed["radius"]
+
+        # Segment the whole source mesh and fit a cylinder to each region.
+        prev_active = context.view_layer.objects.active
+        if context.object and context.object.mode == "EDIT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+        bpy.ops.object.select_all(action="DESELECT")
+        src.select_set(True)
+        context.view_layer.objects.active = src
+        bpy.ops.object.mode_set(mode="EDIT")
+        bm = bmesh.from_edit_mesh(src.data)
+        all_faces = list(bm.faces)
+        clusters = _segment_faces(all_faces, math.radians(s.segment_angle))
+        mw = src.matrix_world
+        nmat = mw.to_3x3().inverted_safe().transposed()
+        regions = [_region_from_faces(c, mw, nmat) for c in clusters]
+        cluster_idx = [",".join(str(f.index) for f in c) for c in clusters]
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+        candidates = []
+        for region in regions:
+            if len(region.points) < 6:
+                candidates.append(None)
+                continue
+            fit = FITTERS["CYLINDER"](region)
+            candidates.append(None if fit is None else {
+                "radius": fit.params["radius"], "axis": fit.params["axis"],
+                "center": fit.params["base"], "height": fit.params["height"], "_fit": fit})
+
+        idxs = match_cylinders(seed_cyl, candidates,
+                               radius_tol=0.05, axis_tol_deg=5.0)
+
+        matched_centers = []
+        created = 0
+        for i in idxs:
+            c = candidates[i]
+            center = np.array(c["center"])
+            matched_centers.append(center)
+            if np.linalg.norm(center - seed_center) < 0.5 * max(seed_r, 1e-6):
+                continue                              # this is the seed itself
+            _add_feature(context, s, c["_fit"], src, build_object=True,
+                         operation=feat.operation, cut=feat.cut_mode,
+                         source_faces=cluster_idx[i])
+            created += 1
+
+        if prev_active is not None:
+            context.view_layer.objects.active = prev_active
+
+        kind, info = classify_arrangement(matched_centers, seed["axis"]) \
+            if matched_centers else ("SINGLE", {})
+        if created == 0:
+            self.report({"INFO"}, "No other matching holes found")
+            return {"FINISHED"}
+        self.report({"INFO"},
+                    f"Propagated {created} more hole(s) · {kind.lower()} pattern "
+                    f"of {len(matched_centers)}")
         return {"FINISHED"}
 
 
@@ -278,6 +631,13 @@ class REVERSE_OT_select_feature_object(Operator):
         return {"FINISHED"}
 
 
+# String/bool metadata params that round-trip verbatim from obj["reverse"] into
+# the export feature dict (set by features that tag geometry — fillet role,
+# thread spec, counterbore preset). Numeric feature params instead extend the
+# points/dirs/lengths schema below so they get transformed/scaled correctly.
+_METADATA_KEYS = ("role", "thread_spec", "hole_preset")
+
+
 # Which params are points / directions / lengths, for transforming to world.
 _PARAM_KINDS = {
     "PLANE": {"points": ["point"], "dirs": ["normal", "e1", "e2"],
@@ -290,6 +650,8 @@ _PARAM_KINDS = {
     "SPHERE": {"points": ["center"], "dirs": [], "lengths": ["radius"]},
     "TORUS": {"points": ["center"], "dirs": ["axis"],
               "lengths": ["major_radius", "minor_radius"]},
+    "FILLET": {"points": ["base"], "dirs": ["axis", "ref"],
+               "lengths": ["radius", "height"]},
 }
 
 
@@ -337,6 +699,18 @@ def _feature_from_object(obj, user_scale):
             params[key] = float(data[key]) * obj_scale * s
     if "half_angle" in data.keys():
         params["half_angle"] = float(data["half_angle"])
+    for key in ("u_min", "u_max"):          # fillet arc angles — invariant under the frame
+        if key in data.keys():
+            params[key] = float(data[key])
+    for key in _METADATA_KEYS:
+        if key in data.keys():
+            params[key] = data[key]
+    # Counterbore / countersink recess params: radius/depth scale, angle does not.
+    for key in ("cbore_radius", "cbore_depth"):
+        if key in data.keys():
+            params[key] = float(data[key]) * obj_scale * s
+    if "csink_angle" in data.keys():
+        params["csink_angle"] = float(data["csink_angle"])
 
     rgb = tuple(obj.color[:3])
     color = rgb if any(abs(c - 1.0) > 1e-4 for c in rgb) else None
@@ -344,6 +718,22 @@ def _feature_from_object(obj, user_scale):
     cut = data["cut"] if "cut" in data.keys() else "THROUGH"
     return {"kind": kind, "name": obj.name, "params": params, "color": color,
             "op": op, "cut": cut}
+
+
+def _format_report(info):
+    """Build the human-readable validation report from an occ_export ExportReport."""
+    lines = []
+    for s in getattr(info, "solids", []):
+        flag = "valid" if s["valid"] else "INVALID"
+        lines.append(f"Solid {s['index']}: vol {s['volume']:.4g} · {flag}")
+    fe = getattr(info, "free_edges", None)
+    if fe:
+        lines.append(f"{fe} open edge(s) — NOT watertight")
+    elif getattr(info, "watertight", None):
+        lines.append("watertight ✓")
+    if getattr(info, "valid", None) is False:
+        lines.append("overall: INVALID topology")
+    return "\n".join(lines) if lines else str(info)
 
 
 class REVERSE_OT_export_step(Operator, ExportHelper):
@@ -379,6 +769,14 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
         ),
         default=0.05, min=0.0, max=1.0, subtype="FACTOR",
     )
+    auto_stitch: BoolProperty(
+        name="Auto-stitch shared edges",
+        description=(
+            "Fuse the additive solids and unify coincident faces so abutting "
+            "features share real edges (one box instead of two islands). OCCT only"
+        ),
+        default=False,
+    )
     make_watertight: BoolProperty(
         name="Make watertight",
         description=(
@@ -408,6 +806,23 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
         description="Export only selected Reverse objects (otherwise all in the scene)",
         default=False,
     )
+    write_pmi_sidecar: BoolProperty(
+        name="Write PMI sidecar",
+        description=(
+            "Also write .pmi.json and .pmi.csv next to the STEP with each feature's "
+            "dimensions (radii, diameters, lengths, angles, threads) and pairwise "
+            "relationships (axis angles, hole spacing)"
+        ),
+        default=False,
+    )
+    semantic_pmi: BoolProperty(
+        name="Embed semantic PMI",
+        description=(
+            "Embed AP242 semantic dimensions (DIMENSIONAL_SIZE) in the STEP so CAD "
+            "reads diameters/lengths as queryable PMI (pure-Python writer only)"
+        ),
+        default=False,
+    )
 
     @classmethod
     def poll(cls, context):
@@ -428,6 +843,13 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
 
         name = os.path.splitext(os.path.basename(self.filepath))[0] or "Reverse"
 
+        if self.write_pmi_sidecar:
+            try:
+                jp, cp = pmi_export.write_sidecar(features, self.filepath)
+                self.report({"INFO"}, f"PMI sidecar → {os.path.basename(jp)}, {os.path.basename(cp)}")
+            except Exception as exc:
+                self.report({"WARNING"}, f"PMI sidecar failed: {exc}")
+
         ensure_occt_on_path()
         use_occt = self.backend == "OCCT" or (self.backend == "AUTO" and occ_export.is_available())
         if self.backend == "OCCT" and not occ_export.is_available():
@@ -440,7 +862,9 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
                                          merge=self.merge_solids,
                                          overshoot=self.cutter_overshoot,
                                          watertight=self.make_watertight,
-                                         sew_tol=self.sew_tolerance)
+                                         sew_tol=self.sew_tolerance,
+                                         auto_stitch=self.auto_stitch)
+                context.scene.reverse.last_report = _format_report(info)
                 self.report({"INFO"}, f"Exported via OCCT: {info}")
                 return {"FINISHED"}
             except Exception as exc:
@@ -452,10 +876,14 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
             product_name=name,
             timestamp=datetime.datetime.now().isoformat(timespec="seconds"),
             filename=os.path.basename(self.filepath),
+            pmi=self.semantic_pmi,
         )
         with open(self.filepath, "w", encoding="ascii", errors="replace") as fp:
             fp.write(text)
 
+        context.scene.reverse.last_report = (
+            "Validation (volumes / watertightness) requires the OCCT kernel.\n"
+            "Install it from the panel to get a per-solid report.")
         self.report({"INFO"}, f"Exported {len(features)} primitives → {os.path.basename(self.filepath)}")
         return {"FINISHED"}
 
@@ -516,8 +944,52 @@ def menu_export(self, context):
     self.layout.operator(REVERSE_OT_export_step.bl_idname, text="Reverse STEP (AP242) (.step)")
 
 
+def _reconcile_scene(scene):
+    """Sync a scene's feature list with the objects that carry ``["reverse"]``.
+
+    Drops features whose clean object no longer exists, and adds a feature for
+    every Reverse object missing from the list — so the stack survives save/reload
+    and picks up objects appended from another file.
+    """
+    s = getattr(scene, "reverse", None)
+    if s is None:
+        return
+    for i in range(len(s.features) - 1, -1, -1):
+        name = s.features[i].object_name
+        if name and bpy.data.objects.get(name) is None:
+            s.features.remove(i)
+    known = {f.object_name for f in s.features if f.object_name}
+    for o in scene.objects:
+        if o.type != "MESH" or "reverse" not in o or o.name in known:
+            continue
+        data = o["reverse"]
+        item = s.features.add()
+        item.kind = data.get("kind", "")
+        item.object_name = o.name
+        item.operation = data.get("op", "ADD")
+        item.cut_mode = data.get("cut", "THROUGH")
+        item.rms = float(data.get("rms", 0.0))
+        item.max_error = float(data.get("max_error", 0.0))
+        try:
+            item.summary = summarize(item.kind, {k: data[k] for k in data.keys()})
+        except (KeyError, TypeError, ValueError):
+            item.summary = item.kind
+    s.active_feature = min(s.active_feature, max(0, len(s.features) - 1))
+
+
+@persistent
+def _reconcile_features(_dummy):
+    for scene in bpy.data.scenes:
+        _reconcile_scene(scene)
+
+
 classes = (
     REVERSE_OT_fit_selection,
+    REVERSE_OT_select_similar,
+    REVERSE_OT_move_feature,
+    REVERSE_OT_remove_feature,
+    REVERSE_OT_refit_feature,
+    REVERSE_OT_propagate_pattern,
     REVERSE_OT_clear_features,
     REVERSE_OT_set_operation,
     REVERSE_OT_set_cut_mode,
@@ -532,9 +1004,13 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.TOPBAR_MT_file_export.append(menu_export)
+    if _reconcile_features not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_reconcile_features)
 
 
 def unregister():
+    if _reconcile_features in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_reconcile_features)
     bpy.types.TOPBAR_MT_file_export.remove(menu_export)
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

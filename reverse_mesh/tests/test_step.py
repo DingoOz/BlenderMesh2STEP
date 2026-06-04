@@ -9,12 +9,14 @@ counts solids — otherwise that step is skipped with a note.
     python3 tests/test_step.py
 """
 
+import math
 import os
 import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import pmi_export  # noqa: E402
 import step_export as se  # noqa: E402
 
 
@@ -27,7 +29,8 @@ def _features():
             "center": (5, 5, 5), "ax": (1, 0, 0), "ay": (0, 1, 0), "az": (0, 0, 1),
             "hx": 2.0, "hy": 3.0, "hz": 4.0}},
         {"kind": "CYLINDER", "name": "c", "params": {
-            "base": (10, 0, 0), "axis": (0, 0, 1), "radius": 2.0, "height": 6.0}},
+            "base": (10, 0, 0), "axis": (0, 0, 1), "radius": 2.0, "height": 6.0,
+            "thread_spec": "M8x1.25"}},
         {"kind": "CONE", "name": "cn", "params": {
             "base": (20, 0, 0), "axis": (0, 0, 1), "radius1": 3.0, "radius2": 1.0,
             "height": 5.0}},
@@ -38,6 +41,9 @@ def _features():
         {"kind": "TORUS", "name": "t", "params": {
             "center": (50, 0, 0), "axis": (0, 0, 1), "major_radius": 5.0,
             "minor_radius": 1.5}},
+        {"kind": "FILLET", "name": "fl", "params": {     # 90° edge fillet patch
+            "base": (60, 0, 0), "axis": (0, 0, 1), "ref": (1, 0, 0),
+            "radius": 1.0, "height": 4.0, "u_min": 0.0, "u_max": math.pi / 2}},
     ]
 
 
@@ -55,6 +61,7 @@ def main():
     check("footer", text.rstrip().endswith("END-ISO-10303-21;"))
     check("ap242 schema", se.AP242_SCHEMA in text)
     check("has DATA/ENDSEC", "DATA;" in text and "ENDSEC;" in text)
+    check("thread annotation", "M8x1.25" in text and "thread M8x1.25" in text)
 
     # Every referenced #id must be defined exactly once.
     defined = set(re.findall(r"^#(\d+)=", text, re.MULTILINE))
@@ -102,6 +109,33 @@ def main():
             check("OCCT import", False, f"status={status}")
     except ImportError:
         print("[skip] OCCT not available — structural checks only")
+
+    # PMI sidecar (#11a): dimensions + relationships from the same feature dicts.
+    pmi = pmi_export.build_pmi(_features())
+    cyl = next(f for f in pmi["features"] if f["kind"] == "CYLINDER")
+    check("pmi cylinder diameter", abs(cyl["dimensions"]["diameter"] - 4.0) < 1e-9,
+          f"d={cyl['dimensions'].get('diameter')}")
+    check("pmi carries thread", cyl["dimensions"].get("thread") == "M8x1.25")
+    sphere = next(f for f in pmi["features"] if f["kind"] == "SPHERE")
+    check("pmi sphere radius", abs(sphere["dimensions"]["radius"] - 2.5) < 1e-9)
+    # cylinder@(10,0,0) ↔ sphere@(40,0,0) → distance 30 along x.
+    dists = [r["value"] for r in pmi["relationships"] if r["type"] == "distance"]
+    check("pmi has hole spacing", any(abs(d - 30.0) < 1e-6 for d in dists),
+          f"distances include 30? {any(abs(d-30.0)<1e-6 for d in dists)}")
+    check("pmi has axis angles",
+          any(r["type"] == "axis_angle_deg" for r in pmi["relationships"]))
+
+    # Semantic AP242 PMI (#11b): DIMENSIONAL_SIZE entities, refs still resolve.
+    ptext = se.build_step(_features(), unit="MM", product_name="PMI", pmi=True)
+    pdefs = set(re.findall(r"^#(\d+)=", ptext, re.MULTILINE))
+    prefs = set(re.findall(r"#(\d+)", ptext.split("DATA;", 1)[1]))
+    check("semantic pmi entities", "DIMENSIONAL_SIZE(" in ptext
+          and "SHAPE_DIMENSION_REPRESENTATION(" in ptext
+          and "MEASURE_REPRESENTATION_ITEM(" in ptext)
+    check("semantic pmi no dangling refs", not (prefs - pdefs),
+          f"missing {sorted(prefs - pdefs)[:5]}")
+    n_dims = ptext.count("DIMENSIONAL_SIZE(")
+    check("semantic pmi dimension count", n_dims >= 5, f"got {n_dims}")  # cyl/cone/sph/torus/fillet
 
     print(f"\n{'ALL STEP CHECKS PASSED' if ok else 'STEP CHECKS FAILED'}")
     sys.exit(0 if ok else 1)

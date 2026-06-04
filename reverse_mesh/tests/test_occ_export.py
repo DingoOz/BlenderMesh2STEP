@@ -6,6 +6,7 @@ sys.path:
     blender --background --python reverse_mesh/tests/test_occ_export.py
 """
 
+import math
 import os
 import sys
 
@@ -35,6 +36,19 @@ def main():
     out = os.path.join(os.path.dirname(__file__), "occ_sample.step")
     info = occ_export.export(feats, out, unit="MM", merge=False)
     print("[info]", info)
+
+    # Validation report (#10): structured per-solid volume + validity surfaced.
+    if not hasattr(info, "solids") or len(info.solids) != 3:
+        fail(f"export report missing per-solid data: {getattr(info, 'solids', None)}")
+    if not all(s["valid"] for s in info.solids):
+        fail(f"report flagged invalid solids: {info.solids}")
+    sph = next((s for s in info.solids if abs(s["volume"] - (4.0 / 3.0 * math.pi * 2.5 ** 3)) < 0.5), None)
+    if sph is None:
+        fail(f"sphere volume not reported correctly: {[s['volume'] for s in info.solids]}")
+    if info.valid is not True:
+        fail(f"overall validity not True: {info.valid}")
+    print(f"[ok] validation report: {len(info.solids)} solids, volumes "
+          f"{[round(s['volume'], 2) for s in info.solids]}, all valid")
 
     head = open(out).read(2000)
     if "10303 442" not in head:                 # AP242 schema identifier
@@ -100,7 +114,6 @@ def main():
     props = GProp_GProps()
     BRepGProp.VolumeProperties_s(sh3, props)
     vol = props.Mass()
-    import math
     expected = 64.0 - math.pi * 1.0 ** 2 * 4.0      # box minus the drilled cylinder
     ok = (n3 == 1 and BRepCheck_Analyzer(sh3).IsValid() and abs(vol - expected) < 0.5)
     print(f"[info] cut: solids={n3} volume={vol:.3f} expected={expected:.3f}")
@@ -109,6 +122,31 @@ def main():
     print("[ok] OCCT boolean SUBTRACT: box with drilled hole, volume correct")
     try:
         os.remove(out3)
+    except OSError:
+        pass
+
+    # Counterbore (#6): a through hole (r1) with a wider flat recess (r1.5, depth1)
+    # at the top. Volume = 64 − π·1²·4 (bore) − π·(1.5²−1²)·1 (counterbore ring).
+    cbore = [
+        {"kind": "BOX", "op": "ADD", "name": "base", "params": {
+            "center": (0, 0, 0), "ax": (1, 0, 0), "ay": (0, 1, 0), "az": (0, 0, 1),
+            "hx": 2.0, "hy": 2.0, "hz": 2.0}},
+        {"kind": "CYLINDER", "op": "SUBTRACT", "name": "hole", "params": {
+            "base": (0, 0, 0), "axis": (0, 0, 1), "radius": 1.0, "height": 4.0,
+            "hole_preset": "COUNTERBORE", "cbore_radius": 1.5, "cbore_depth": 1.0}},
+    ]
+    out_cb = os.path.join(os.path.dirname(__file__), "occ_cbore.step")
+    occ_export.export(cbore, out_cb, unit="MM", merge=False, overshoot=0.05)
+    rcb = STEPControl_Reader(); rcb.ReadFile(out_cb); rcb.TransferRoots(); shcb = rcb.OneShape()
+    prcb = GProp_GProps(); BRepGProp.VolumeProperties_s(shcb, prcb); vcb = prcb.Mass()
+    expected_cb = 64.0 - math.pi * 4.0 - math.pi * (1.5 ** 2 - 1.0 ** 2) * 1.0
+    valid_cb = BRepCheck_Analyzer(shcb).IsValid()
+    print(f"[info] counterbore: volume={vcb:.3f} expected={expected_cb:.3f} valid={valid_cb}")
+    if not valid_cb or abs(vcb - expected_cb) > 0.5:
+        fail(f"counterbore volume wrong (vol={vcb:.3f}, expected {expected_cb:.3f})")
+    print("[ok] counterbore: through hole + flat recess, volume correct")
+    try:
+        os.remove(out_cb)
     except OSError:
         pass
 
@@ -178,6 +216,38 @@ def main():
     except OSError:
         pass
 
+    # Auto-stitch (#4): two boxes abutting at z=0 form a 2x2x4 bar. Fuse + unify
+    # must give ONE solid with 6 faces (coplanar sides merged), not 10.
+    two_boxes = [
+        {"kind": "BOX", "op": "ADD", "name": "low", "params": {
+            "center": (0, 0, -1), "ax": (1, 0, 0), "ay": (0, 1, 0), "az": (0, 0, 1),
+            "hx": 1.0, "hy": 1.0, "hz": 1.0}},
+        {"kind": "BOX", "op": "ADD", "name": "high", "params": {
+            "center": (0, 0, 1), "ax": (1, 0, 0), "ay": (0, 1, 0), "az": (0, 0, 1),
+            "hx": 1.0, "hy": 1.0, "hz": 1.0}},
+    ]
+    out_st = os.path.join(os.path.dirname(__file__), "occ_stitch.step")
+    info_st = occ_export.export(two_boxes, out_st, unit="MM", auto_stitch=True)
+    print("[info] stitch:", info_st)
+    rst = STEPControl_Reader(); rst.ReadFile(out_st); rst.TransferRoots(); shst = rst.OneShape()
+    n_st = 0
+    e = TopExp_Explorer(shst, TopAbs_SOLID)
+    while e.More():
+        n_st += 1; e.Next()
+    nf_st = 0
+    e = TopExp_Explorer(shst, TopAbs_FACE)
+    while e.More():
+        nf_st += 1; e.Next()
+    prst = GProp_GProps(); BRepGProp.VolumeProperties_s(shst, prst); v_st = prst.Mass()
+    print(f"[info] stitched bar: solids={n_st} faces={nf_st} volume={v_st:.3f} (expect 1, 6, 16)")
+    if n_st != 1 or nf_st != 6 or abs(v_st - 16.0) > 0.01 or not BRepCheck_Analyzer(shst).IsValid():
+        fail(f"auto-stitch did not unify two boxes (solids={n_st}, faces={nf_st}, vol={v_st:.3f})")
+    print("[ok] auto-stitch: two abutting boxes → 1 solid, 6 shared faces")
+    try:
+        os.remove(out_st)
+    except OSError:
+        pass
+
     # Watertight: 6 loose planes that tile a 2x2x2 box must sew into one closed solid.
     def plane(c, n, e1, e2):
         return {"kind": "PLANE", "op": "ADD", "name": "f", "params": {
@@ -208,6 +278,74 @@ def main():
     print("[ok] watertight: 6 loose planes → 1 closed box solid (volume 8)")
     try:
         os.remove(out6)
+    except OSError:
+        pass
+
+    # Fillet (#5): a 90° edge fillet exports as a trimmed cylindrical patch.
+    from reverse_mesh import step_export
+    fillet = [{"kind": "FILLET", "name": "fl", "params": {
+        "base": (0, 0, 0), "axis": (0, 0, 1), "ref": (1, 0, 0),
+        "radius": 1.0, "height": 4.0, "u_min": 0.0, "u_max": math.pi / 2}}]
+    expected_area = 1.0 * (math.pi / 2) * 4.0      # r · span · height
+
+    # OCCT-native path.
+    out_fl = os.path.join(os.path.dirname(__file__), "occ_fillet.step")
+    occ_export.export(fillet, out_fl, unit="MM")
+    rfl = STEPControl_Reader(); rfl.ReadFile(out_fl); rfl.TransferRoots(); shfl = rfl.OneShape()
+    nf = 0
+    e = TopExp_Explorer(shfl, TopAbs_FACE)
+    while e.More():
+        nf += 1; e.Next()
+    afl = GProp_GProps(); BRepGProp.SurfaceProperties_s(shfl, afl); area_fl = afl.Mass()
+    print(f"[info] OCCT fillet: faces={nf} area={area_fl:.3f} expected={expected_area:.3f}")
+    if shfl.IsNull() or nf < 1 or abs(area_fl - expected_area) > 0.05:
+        fail(f"OCCT fillet patch wrong (faces={nf}, area={area_fl:.3f})")
+    print("[ok] OCCT fillet: trimmed cylindrical patch, area correct")
+
+    # Pure-Python path: the hand-written trimmed face must re-read as valid.
+    out_flp = os.path.join(os.path.dirname(__file__), "py_fillet.step")
+    with open(out_flp, "w") as f:
+        f.write(step_export.build_step(fillet, unit="MM", product_name="Fillet"))
+    rflp = STEPControl_Reader()
+    if rflp.ReadFile(out_flp) != IFSelect_RetDone:
+        fail("pure-Python fillet did not re-read")
+    rflp.TransferRoots(); shflp = rflp.OneShape()
+    aflp = GProp_GProps(); BRepGProp.SurfaceProperties_s(shflp, aflp); area_p = aflp.Mass()
+    print(f"[info] pure-Python fillet: valid={BRepCheck_Analyzer(shflp).IsValid()} area={area_p:.3f}")
+    if shflp.IsNull() or not BRepCheck_Analyzer(shflp).IsValid() or abs(area_p - expected_area) > 0.05:
+        fail(f"pure-Python fillet patch invalid (area={area_p:.3f})")
+    print("[ok] pure-Python fillet: trimmed patch re-reads valid, area correct")
+    for f in (out_fl, out_flp):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+
+    # Semantic PMI (#11b): a PMI-embedded pure-Python STEP must still re-read and
+    # its geometry import cleanly (the dimensions ride alongside, not breaking it).
+    pmi_feats = [
+        {"kind": "CYLINDER", "name": "c", "params": {
+            "base": (0, 0, 0), "axis": (0, 0, 1), "radius": 2.0, "height": 6.0}},
+        {"kind": "SPHERE", "name": "s", "params": {"center": (10, 0, 0), "radius": 2.5}},
+    ]
+    out_pmi = os.path.join(os.path.dirname(__file__), "py_pmi.step")
+    with open(out_pmi, "w") as f:
+        f.write(step_export.build_step(pmi_feats, unit="MM", product_name="PMI", pmi=True))
+    rpmi = STEPControl_Reader()
+    if rpmi.ReadFile(out_pmi) != IFSelect_RetDone:
+        fail("PMI-embedded STEP did not re-read")
+    rpmi.TransferRoots(); shpmi = rpmi.OneShape()
+    npmi = 0
+    e = TopExp_Explorer(shpmi, TopAbs_SOLID)
+    while e.More():
+        npmi += 1; e.Next()
+    if shpmi.IsNull() or npmi != 2:
+        fail(f"PMI embedding broke geometry import (solids={npmi})")
+    if "DIMENSIONAL_SIZE(" not in open(out_pmi).read():
+        fail("semantic dimensions missing from PMI STEP")
+    print(f"[ok] semantic PMI: dimensions embedded, geometry still imports ({npmi} solids)")
+    try:
+        os.remove(out_pmi)
     except OSError:
         pass
 

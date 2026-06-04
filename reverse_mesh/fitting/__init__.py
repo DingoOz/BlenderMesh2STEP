@@ -2,15 +2,22 @@
 """Primitive-fitting core. Pure NumPy, no Blender dependency."""
 
 from .common import FitResult, Region
+from .patterns import classify_arrangement, match_cylinders
 from .primitives import (
     FITTERS,
     fit_auto,
     fit_box,
     fit_cone,
     fit_cylinder,
+    fit_fillet,
     fit_plane,
+    fit_robust,
     fit_sphere,
     fit_torus,
+    predicted_normals,
+    signed_distances,
+    snap_result,
+    summarize,
 )
 
 __all__ = [
@@ -24,4 +31,12 @@ __all__ = [
     "fit_cone",
     "fit_sphere",
     "fit_torus",
+    "fit_fillet",
+    "fit_robust",
+    "predicted_normals",
+    "signed_distances",
+    "snap_result",
+    "summarize",
+    "match_cylinders",
+    "classify_arrangement",
 ]

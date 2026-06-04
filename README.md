@@ -41,13 +41,26 @@ Blender-authored meshes. The result is a true B-rep solid, not an approximation.
   Export STEP and open it in FreeCAD as a true solid you can dimension and modify.
 - **Reconstruct boxes and cuboids** — even rotated ones — from their flat faces,
   instead of an averaged mess. One click turns a cube into a proper box solid.
+- **Recover edge fillets** as real rounds. Select a fillet strip → get a trimmed
+  partial-cylinder surface with the exact blend radius and arc, not faceted triangles.
 - **Drill holes and cut pockets with booleans.** Tag a fitted cylinder as
   *Subtract* and the exporter carves it out of the base body — reconstructing a
-  drilled, pocketed part as a single watertight solid with real holes.
-- **Split a whole object into its surfaces automatically.** Segmentation turns a
-  cube into 6 planes, or a cylinder into its side + 2 caps, and fits each.
-- **Measure and verify.** Every fit reports its RMS error so you know how well it
-  matches; exported solids are kernel-valid with correct volumes.
+  drilled, pocketed part as a single watertight solid with real holes. Add a
+  **counterbore or countersink** preset and the recess is cut too.
+- **Select a whole surface in one click** ("Select Similar" grows from one face to
+  the entire wall, stopping at sharp edges), or **split an object into its surfaces
+  automatically** — a cube into 6 planes, a cylinder into its side + 2 caps.
+- **Fit one hole, get the rest.** *Propagate Pattern* finds every matching hole in
+  the mesh (bolt circles, arrays, mirrors) and fits them with the seed's settings.
+- **See exactly how good each fit is.** A green→red **deviation heatmap** colours
+  the selected faces so a stray chamfer or mis-pick is obvious, not buried in an
+  average. Optional **outlier rejection** (RANSAC) survives a slightly dirty selection.
+- **Edit non-destructively.** Every fit lands in a **feature stack** you can
+  reorder, re-fit, delete, and reload across sessions — toggle Add/Subtract, snap
+  dimensions to nice numbers, or tag a hole with a thread (e.g. `M8x1.25`).
+- **Measure and verify.** Every fit reports its RMS error; the export gives a
+  **per-solid validation report** (volume, validity, open edges), and you can write
+  a **PMI dimension sidecar** (CSV/JSON) or embed **semantic AP242 dimensions**.
 
 ## Fits the full analytic surface set
 
@@ -59,6 +72,7 @@ Blender-authored meshes. The result is a true B-rep solid, not an approximation.
 | **Cone** | apex, half-angle, radii (incl. frustums) | linear apex condition `(p−apex)·n = 0` |
 | **Sphere** | centre, radius | algebraic least squares |
 | **Torus** | axis, major + minor radius | PCA seed + angular refinement |
+| **Fillet** | edge round → partial cylinder (radius + arc) | circle fit + angular-extent recovery |
 | **Auto** | picks the best fit | normal agreement + Occam tie-break |
 
 On clean meshes these fits land at **~1e-8** RMS — effectively exact.
@@ -67,8 +81,11 @@ On clean meshes these fits land at **~1e-8** RMS — effectively exact.
 
 1. Select your mesh, enter **Edit Mode**, open the **Reverse** tab in the sidebar (`N`).
 2. Choose a primitive (or **Auto-detect**) and a **Role** (*Add* / *Subtract*).
-3. Select the faces of one feature → **Fit Primitive to Selection**. Repeat per feature.
-4. **Export STEP (AP242)** → open it in your CAD tool as a real solid.
+3. Select the faces of one feature (or click one and **Select Similar**) →
+   **Fit Primitive to Selection**. The fit lands in the feature stack; the optional
+   heatmap shows how well it matches. Repeat per feature.
+4. **Export STEP (AP242)** → open it in your CAD tool as a real solid, and read the
+   validation report to confirm volumes and watertightness.
 
 That's the semi-automatic, human-in-the-loop model proven by the
 [Reverse](https://github.com/nico-schluter/Reverse) Fusion 360 add-in — robust,
@@ -77,14 +94,19 @@ because *you* supply the one thing a mesh can't: intent.
 ## Two ways to export — both real STEP
 
 **Pure Python (built in, zero dependencies).** Writes genuine analytic surfaces
-(`CYLINDRICAL_SURFACE`, `TOROIDAL_SURFACE`, …) as valid `MANIFOLD_SOLID_BREP`
-solids in a real **AP242** file, assembled with units and per-feature colour. No
-kernel, no install — works the moment you enable the add-on.
+(`CYLINDRICAL_SURFACE`, `TOROIDAL_SURFACE`, trimmed fillet patches, …) as valid
+`MANIFOLD_SOLID_BREP` solids in a real **AP242** file, assembled with units and
+per-feature colour. Optionally annotates threads and embeds **semantic PMI
+dimensions** (`DIMENSIONAL_SIZE`). No kernel, no install — works the moment you
+enable the add-on.
 
 **OCCT kernel (optional, one-click install).** For **merging solids into one
 watertight body**, **boolean Add/Subtract** (drilling through & blind holes,
-cutting pockets), and a **Make watertight** sew-and-heal pass that stitches loose
-faces into a closed solid and tells you if any boundary is still open.
+cutting pockets, counterbores & countersinks), **auto-stitch** that unifies
+abutting features into genuinely shared topology, and a **Make watertight**
+sew-and-heal pass that stitches loose faces into a closed solid and tells you if
+any boundary is still open. Every export comes with a **validation report** —
+per-solid volume, kernel validity, and open-edge count.
 If OpenCASCADE isn't present, the panel offers an **Install OCCT** button that
 fetches it into the add-on's own folder — no admin rights, survives Blender
 updates. Without it, everything else still works.
@@ -97,6 +119,9 @@ as **topologically valid with the correct volume**, e.g.
 
 - cylinder r2 × h6 → **75.40**, sphere r2.5 → **65.45**, torus → **222.07**
 - box 4×4×4 drilled by an r1 cylinder → **64 − 4π = 51.43** ✅
+- box drilled + counterbored (r1.5 × 1 deep) → **47.51** ✅
+- two abutting boxes, auto-stitched → **one solid, 6 shared faces** (not two islands)
+- 90° edge fillet → trimmed cylindrical patch, re-reads valid with exact area ✅
 
 ## Install
 
@@ -115,7 +140,8 @@ blender --command extension build --source-dir reverse_mesh --output-dir dist
 ```bash
 python3 reverse_mesh/tests/test_fitting.py     # fitting core (no Blender)
 python3 reverse_mesh/tests/test_step.py        # STEP writer (no Blender)
-blender --background --python reverse_mesh/tests/blender_smoke.py   # integration
+blender --background --python reverse_mesh/tests/blender_smoke.py     # integration
+blender --background --python reverse_mesh/tests/test_occ_export.py   # OCCT kernel (if installed)
 ```
 
 ## Honest about the edges
@@ -130,8 +156,16 @@ design rationale and the tiered roadmap, and
 
 ## Roadmap
 
+**Recently landed:** edge-fillet recovery with trimmed-surface export · pattern
+propagation (fit one hole, find the rest) · auto-stitch into shared topology ·
+counterbore/countersink presets · fit-quality heatmap · RANSAC outlier rejection ·
+non-destructive feature stack · dimension snapping · validation report · thread
+tagging · PMI sidecar + semantic AP242 dimensions.
+
+**Next:**
+
 - In-place region replacement (stitch the clean primitive back into the mesh)
-- Partial-cylinder / partial-torus fitting (select just the visible wall of a hole)
+- Corner-blend (partial-torus) fillets, beyond the current edge-fillet case
 - OCCT intersect/section ops and per-feature colour via XCAF
 - Sketch + extrude/revolve recovery (Tier 2 — genuinely parametric output)
 

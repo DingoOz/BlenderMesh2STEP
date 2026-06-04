@@ -21,10 +21,16 @@ from fitting import (  # noqa: E402
     fit_box,
     fit_cone,
     fit_cylinder,
+    fit_fillet,
     fit_plane,
+    fit_robust,
     fit_sphere,
     fit_torus,
+    signed_distances,
+    snap_result,
 )
+from fitting.common import deviation_color, snap_value  # noqa: E402
+from fitting.patterns import classify_arrangement, match_cylinders  # noqa: E402
 
 
 def _region(pts, nrm):
@@ -82,6 +88,17 @@ def _sample_torus(big_r=5.0, r=1.5, n_major=64, n_minor=24, seed=4):
     normals = np.column_stack([np.cos(vv) * np.cos(uu), np.cos(vv) * np.sin(uu), np.sin(vv)])
     center = np.array([2.0, -1.0, 0.5])
     return pts + center, normals
+
+
+def _sample_fillet(r=1.5, span_deg=90.0, h=6.0, n=600, seed=7):
+    # A quarter-cylinder strip: arc 0..span around +Z axis, radius r.
+    rng = np.random.default_rng(seed)
+    span = math.radians(span_deg)
+    theta = rng.uniform(0.0, span, n)              # arc, not a full circle
+    z = rng.uniform(0, h, n)
+    pts = np.column_stack([r * np.cos(theta), r * np.sin(theta), z])
+    normals = np.column_stack([np.cos(theta), np.sin(theta), np.zeros(n)])
+    return pts, normals
 
 
 def _sample_box(hx=2.0, hy=3.0, hz=4.0, seed=5, rot=True):
@@ -167,6 +184,109 @@ def main():
         r = fit_auto(_region(pts, nrm))
         results.append(_check(f"auto->{name}", r is not None and r.kind == name.upper(),
                               f"got {r.kind if r else None}"))
+
+    # signed_distances must reproduce each fitter's own RMS (INFRA-A): the
+    # per-point residual evaluator and the internal aggregate must agree.
+    for name, sampler, fitter in [("plane", _sample_plane, fit_plane),
+                                  ("sphere", _sample_sphere, fit_sphere),
+                                  ("cylinder", _sample_cylinder, fit_cylinder),
+                                  ("cone", _sample_cone, fit_cone),
+                                  ("torus", _sample_torus, fit_torus),
+                                  ("box", _sample_box, fit_box)]:
+        pts, nrm = sampler()
+        r = fitter(_region(pts, nrm))
+        d = signed_distances(r, pts)
+        rms = float(np.sqrt(np.mean(d ** 2)))
+        results.append(_check(f"signed_distances->{name}",
+                              r is not None and abs(rms - r.rms) <= 1e-9 + 1e-6 * r.rms,
+                              f"rms={rms:.3e} vs r.rms={r.rms:.3e}"))
+
+    # fit_auto(return_candidates=True): back-compat + ordering (INFRA-D).
+    pts, nrm = _sample_cylinder()
+    best_only = fit_auto(_region(pts, nrm))
+    best, cands = fit_auto(_region(pts, nrm), return_candidates=True)
+    ok_cand = (best is not None and best.kind == "CYLINDER"
+               and best_only.kind == best.kind            # single-return unchanged
+               and len(cands) >= 1 and cands[0]["winner"]  # winner sorted first
+               and cands[0]["result"] is best
+               and all(cands[i]["rel_rms"] <= cands[i + 1]["rel_rms"] + 1e-12
+                       for i in range(1, len(cands) - 1)))  # rest ascending
+    results.append(_check("auto candidates", ok_cand,
+                          f"n={len(cands)} top={cands[0]['kind'] if cands else None}"))
+
+    # Dimension snapping (#3): close values snap, distant ones are left alone.
+    v, ch = snap_value(19.98, step=1.0)               # 0.1% off → snap
+    results.append(_check("snap close→nice", ch and abs(v - 20.0) < 1e-9, f"got {v}"))
+    v, ch = snap_value(17.3, step=1.0)                # 1.7% off → keep
+    results.append(_check("snap keeps genuine", (not ch) and abs(v - 17.3) < 1e-9, f"got {v}"))
+    v, ch = snap_value(2.013, preferred=[1.0, 2.0, 2.5, 5.0])   # 0.65% off → snap
+    results.append(_check("snap to preferred", ch and abs(v - 2.0) < 1e-9, f"got {v}"))
+
+    # snap_result rounds a near-2.0 fitted radius and updates the summary.
+    pts, nrm = _sample_cylinder(r=2.013, h=10.0)
+    r = fit_cylinder(_region(pts, nrm))
+    _, ch = snap_result(r, step=0.1)
+    results.append(_check("snap_result cylinder", ch and abs(r.params['radius'] - 2.0) < 1e-9
+                          and "r=2 " in (r.summary + " "), f"r={r.params['radius']} '{r.summary}'"))
+
+    # Heatmap colour ramp (#1): green at 0, red at 1, clamped, yellow mid.
+    g = deviation_color(0.0)
+    r = deviation_color(1.0)
+    y = deviation_color(0.5)
+    over = deviation_color(5.0)
+    ok_cmap = (g[0] < 0.01 and g[1] > 0.99            # green
+               and r[0] > 0.99 and r[1] < 0.01        # red
+               and y[0] > 0.99 and y[1] > 0.99        # yellow midpoint
+               and over == r)                          # clamped above 1
+    results.append(_check("deviation colour ramp", ok_cmap, f"g={g[:3]} r={r[:3]}"))
+
+    # Robust fit (#13): stray outlier points must not corrupt the recovered radius.
+    pts, nrm = _sample_cylinder(r=2.0, h=10.0, n=400)
+    orng = np.random.default_rng(99)
+    out_pts = orng.uniform(-6, 6, size=(40, 3)); out_pts[:, 0] += 9.0   # off to the side
+    out_nrm = orng.normal(size=(40, 3)); out_nrm /= np.linalg.norm(out_nrm, axis=1, keepdims=True)
+    P = np.vstack([pts, out_pts]); N = np.vstack([nrm, out_nrm])
+    plain = fit_cylinder(_region(P, N))
+    robust = fit_robust(_region(P, N), fit_cylinder, rel_threshold=0.05)
+    err_plain = abs(plain.params["radius"] - 2.0)
+    err_robust = abs(robust.params["radius"] - 2.0)
+    results.append(_check("robust rejects outliers",
+                          robust is not None and err_robust < 0.05 and err_robust < err_plain,
+                          f"plain r={plain.params['radius']:.3f} robust r={robust.params['radius']:.3f}"))
+
+    # Fillet (#5): a 90° quarter-cylinder strip → radius + arc span recovered.
+    pts, nrm = _sample_fillet(r=1.5, span_deg=90.0)
+    r = fit_fillet(_region(pts, nrm))
+    span_deg = math.degrees(r.params["u_max"] - r.params["u_min"]) if r else 0.0
+    results.append(_check("fillet edge", r is not None and r.rms < 1e-6
+                          and abs(r.params["radius"] - 1.5) < 1e-3
+                          and abs(span_deg - 90.0) < 8.0,
+                          f"r={r.params['radius']:.4f} span={span_deg:.1f}° rms={r.rms:.2e}"
+                          if r else "no fit"))
+    # A near-full ring is a cylinder, not a fillet → declined.
+    pts, nrm = _sample_cylinder()
+    results.append(_check("fillet declines full ring", fit_fillet(_region(pts, nrm)) is None))
+
+    # Pattern propagation (#8): 6 holes on a bolt circle, plus two decoys.
+    bolt_r = 5.0
+    seed = {"radius": 1.0, "axis": (0, 0, 1), "center": (bolt_r, 0, 0)}
+    cands = []
+    centers = []
+    for k in range(6):
+        a = 2 * math.pi * k / 6
+        ctr = (bolt_r * math.cos(a), bolt_r * math.sin(a), 0.0)
+        centers.append(ctr)
+        cands.append({"radius": 1.0, "axis": (0, 0, 1), "center": ctr})
+    cands.append({"radius": 2.5, "axis": (0, 0, 1), "center": (0, 0, 0)})     # wrong radius
+    cands.append({"radius": 1.0, "axis": (1, 0, 0), "center": (0, 0, 3)})     # wrong axis
+    matched = match_cylinders(seed, cands, radius_tol=0.05, axis_tol_deg=5.0)
+    results.append(_check("pattern match", matched == [0, 1, 2, 3, 4, 5],
+                          f"matched {matched}"))
+    kind, info = classify_arrangement(centers, (0, 0, 1))
+    results.append(_check("pattern circular", kind == "CIRCULAR" and info["count"] == 6
+                          and abs(info["radius"] - bolt_r) < 1e-6, f"{kind} {info}"))
+    lin_kind, _ = classify_arrangement([(0, 0, 0), (2, 0, 0), (4, 0, 0), (6, 0, 0)], (0, 0, 1))
+    results.append(_check("pattern linear", lin_kind == "LINEAR", f"got {lin_kind}"))
 
     print(f"\n{sum(results)}/{len(results)} passed")
     sys.exit(0 if all(results) else 1)

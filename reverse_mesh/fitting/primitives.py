@@ -19,7 +19,67 @@ from .common import (
     region_scale,
     residual_stats,
     smallest_singular_axis,
+    snap_value,
 )
+
+
+def summarize(kind: str, p: dict) -> str:
+    """One-line human summary of a fit from its params — the single source of
+    truth shared by the fitters and by :func:`snap_result` (so a snapped fit's
+    summary stays in the same format)."""
+    if kind == "PLANE":
+        n = p["normal"]
+        return f"Plane · n=({n[0]:.3f}, {n[1]:.3f}, {n[2]:.3f})"
+    if kind == "SPHERE":
+        return f"Sphere · r={p['radius']:.4g}"
+    if kind == "CYLINDER":
+        return f"Cylinder · r={p['radius']:.4g} · h={p['height']:.4g}"
+    if kind == "CONE":
+        return (f"Cone · r1={p['radius1']:.3g} r2={p['radius2']:.3g} · "
+                f"{np.degrees(p['half_angle']):.1f}°")
+    if kind == "TORUS":
+        return f"Torus · R={p['major_radius']:.4g} r={p['minor_radius']:.4g}"
+    if kind == "BOX":
+        return f"Box · {2 * p['hx']:.3g}×{2 * p['hy']:.3g}×{2 * p['hz']:.3g}"
+    return kind
+
+
+# Which params of each kind are snappable lengths/radii (see :func:`snap_result`).
+_LENGTH_KEYS = {
+    "PLANE": ("half_u", "half_v"),
+    "BOX": ("hx", "hy", "hz"),
+    "CYLINDER": ("radius", "height"),
+    "CONE": ("radius1", "radius2", "height"),
+    "SPHERE": ("radius",),
+    "TORUS": ("major_radius", "minor_radius"),
+}
+
+
+def snap_result(result: FitResult, step=None, preferred=None,
+                rel_tol=None) -> tuple[FitResult, bool]:
+    """Snap a fit's dimensions to 'nice' values in place; return (result, changed).
+
+    Mutates the length/radius params via :func:`snap_value`, keeps the cone's
+    ``half_angle`` consistent with its snapped radii, and regenerates ``summary``.
+    """
+    if result is None:
+        return result, False
+    kw = {} if rel_tol is None else {"rel_tol": rel_tol}
+    changed = False
+    for key in _LENGTH_KEYS.get(result.kind, ()):
+        if key in result.params:
+            v, ch = snap_value(float(result.params[key]), step, preferred, **kw)
+            if ch:
+                result.params[key] = v
+                changed = True
+    if changed:
+        if result.kind == "CONE":
+            p = result.params
+            h = float(p.get("height", 0.0))
+            if h > 1e-12:
+                p["half_angle"] = float(np.arctan(abs(p["radius2"] - p["radius1"]) / h))
+        result.summary = summarize(result.kind, result.params)
+    return result, changed
 
 
 def fit_plane(region: Region) -> FitResult | None:
@@ -41,21 +101,17 @@ def fit_plane(region: Region) -> FitResult | None:
     half_u = float(np.max(np.abs(rel @ e1))) if len(rel) else 1.0
     half_v = float(np.max(np.abs(rel @ e2))) if len(rel) else 1.0
 
-    return FitResult(
-        kind="PLANE",
-        rms=rms,
-        max_error=max_err,
-        params={
-            "point": centroid,
-            "normal": normal,
-            "e1": e1,
-            "e2": e2,
-            "half_u": half_u,
-            "half_v": half_v,
-            "_scale": region_scale(points),
-        },
-        summary=f"Plane · n=({normal[0]:.3f}, {normal[1]:.3f}, {normal[2]:.3f})",
-    )
+    params = {
+        "point": centroid,
+        "normal": normal,
+        "e1": e1,
+        "e2": e2,
+        "half_u": half_u,
+        "half_v": half_v,
+        "_scale": region_scale(points),
+    }
+    return FitResult(kind="PLANE", rms=rms, max_error=max_err, params=params,
+                     summary=summarize("PLANE", params))
 
 
 def fit_sphere(region: Region) -> FitResult | None:
@@ -72,13 +128,9 @@ def fit_sphere(region: Region) -> FitResult | None:
     radial = np.linalg.norm(points - center, axis=1) - radius
     rms, max_err = residual_stats(radial)
 
-    return FitResult(
-        kind="SPHERE",
-        rms=rms,
-        max_error=max_err,
-        params={"center": center, "radius": radius, "_scale": region_scale(points)},
-        summary=f"Sphere · r={radius:.4g}",
-    )
+    params = {"center": center, "radius": radius, "_scale": region_scale(points)}
+    return FitResult(kind="SPHERE", rms=rms, max_error=max_err, params=params,
+                     summary=summarize("SPHERE", params))
 
 
 def fit_cylinder(region: Region) -> FitResult | None:
@@ -113,19 +165,15 @@ def fit_cylinder(region: Region) -> FitResult | None:
         + axis * ((w_min + w_max) / 2.0)
     )
 
-    return FitResult(
-        kind="CYLINDER",
-        rms=rms,
-        max_error=max_err,
-        params={
-            "base": center3d,      # midpoint of the axial span, on the axis
-            "axis": axis,
-            "radius": radius,
-            "height": height,
-            "_scale": region_scale(points),
-        },
-        summary=f"Cylinder · r={radius:.4g} · h={height:.4g}",
-    )
+    params = {
+        "base": center3d,      # midpoint of the axial span, on the axis
+        "axis": axis,
+        "radius": radius,
+        "height": height,
+        "_scale": region_scale(points),
+    }
+    return FitResult(kind="CYLINDER", rms=rms, max_error=max_err, params=params,
+                     summary=summarize("CYLINDER", params))
 
 
 def fit_cone(region: Region) -> FitResult | None:
@@ -174,22 +222,18 @@ def fit_cone(region: Region) -> FitResult | None:
     base3d = apex + axis * w_min          # on the axis, at the r1 end
     half_angle = float(np.arctan(abs(slope)))
 
-    return FitResult(
-        kind="CONE",
-        rms=rms,
-        max_error=max_err,
-        params={
-            "base": base3d,        # on the axis, at the r1 (w_min) end
-            "axis": axis,
-            "radius1": r1,
-            "radius2": r2,
-            "height": height,
-            "apex": apex,
-            "half_angle": half_angle,
-            "_scale": region_scale(surf),
-        },
-        summary=f"Cone · r1={r1:.3g} r2={r2:.3g} · {np.degrees(half_angle):.1f}°",
-    )
+    params = {
+        "base": base3d,        # on the axis, at the r1 (w_min) end
+        "axis": axis,
+        "radius1": r1,
+        "radius2": r2,
+        "height": height,
+        "apex": apex,
+        "half_angle": half_angle,
+        "_scale": region_scale(surf),
+    }
+    return FitResult(kind="CONE", rms=rms, max_error=max_err, params=params,
+                     summary=summarize("CONE", params))
 
 
 def _torus_on_axis(points: np.ndarray, center: np.ndarray, axis: np.ndarray):
@@ -254,19 +298,77 @@ def fit_torus(region: Region) -> FitResult | None:
     _, _, dist = _torus_on_axis(points, center, axis)
     rms, max_err = residual_stats(dist)
 
-    return FitResult(
-        kind="TORUS",
-        rms=rms,
-        max_error=max_err,
-        params={
-            "center": center,
-            "axis": axis,
-            "major_radius": big_r,
-            "minor_radius": r_tube,
-            "_scale": region_scale(points),
-        },
-        summary=f"Torus · R={big_r:.4g} r={r_tube:.4g}",
-    )
+    params = {
+        "center": center,
+        "axis": axis,
+        "major_radius": big_r,
+        "minor_radius": r_tube,
+        "_scale": region_scale(points),
+    }
+    return FitResult(kind="TORUS", rms=rms, max_error=max_err, params=params,
+                     summary=summarize("TORUS", params))
+
+
+def fit_fillet(region: Region) -> FitResult | None:
+    """Edge fillet (constant-radius rolling-ball blend) → a *partial* cylinder.
+
+    A fillet between two faces is a slice of a cylinder: the surface normals sweep
+    an arc rather than a full circle. The radius and axis come from the same
+    circle/axis fit as :func:`fit_cylinder` (the algebraic circle fit works on an
+    arc), and additionally we recover the *angular extent* of the arc — the
+    largest empty angular gap is the missing part — so the surface can be exported
+    as a trimmed patch. Returns ``None`` if the points actually wrap most of a full
+    circle (that's a cylinder, not a fillet).
+    """
+    points = region.points
+    normals = region.face_normals
+    if len(points) < 6:
+        return None
+
+    if len(normals) >= 3 and np.any(normals):
+        axis = smallest_singular_axis(normals)
+    else:
+        _, axis = best_plane_normal(points)
+
+    e1, e2 = orthonormal_basis(axis)
+    origin = points.mean(axis=0)
+    rel = points - origin
+    uv = np.column_stack([rel @ e1, rel @ e2])
+    center2d, radius, radial = fit_circle_2d(uv)
+    rms, max_err = residual_stats(radial)
+
+    # Angular extent about the fitted centre: the arc is everything but the
+    # single largest empty gap between consecutive (sorted) point angles.
+    ang = np.sort(np.arctan2(uv[:, 1] - center2d[1], uv[:, 0] - center2d[0]))
+    ext = np.concatenate([ang, [ang[0] + 2 * np.pi]])
+    gaps = np.diff(ext)
+    gi = int(np.argmax(gaps))
+    if gi == len(ang) - 1:                      # widest gap straddles ±π
+        u_min, u_max = float(ang[0]), float(ang[-1])
+    else:
+        u_min, u_max = float(ang[gi + 1]), float(ang[gi] + 2 * np.pi)
+    span = u_max - u_min
+    if span > np.radians(330.0):                # nearly closed → it's a cylinder
+        return None
+
+    w = rel @ axis
+    w_min, w_max = float(w.min()), float(w.max())
+    height = w_max - w_min
+    center3d = (origin + e1 * center2d[0] + e2 * center2d[1]
+                + axis * ((w_min + w_max) / 2.0))
+
+    params = {
+        "base": center3d,          # on the axis, at the axial midpoint
+        "axis": axis,
+        "ref": e1,                 # u = 0 reference direction
+        "radius": radius,
+        "height": height,
+        "u_min": u_min,            # arc start angle from ref (radians)
+        "u_max": u_max,            # arc end angle (u_max > u_min)
+        "_scale": region_scale(points),
+    }
+    return FitResult(kind="FILLET", rms=rms, max_error=max_err, params=params,
+                     summary=f"Fillet · r={radius:.4g} · {np.degrees(span):.0f}°")
 
 
 def _cluster_axes(normals, tol_cos=0.966):
@@ -351,18 +453,14 @@ def fit_box(region: Region) -> FitResult | None:
     surf_dist = np.min(half - np.abs(local), axis=1)
     rms, max_err = residual_stats(surf_dist)
 
-    return FitResult(
-        kind="BOX",
-        rms=rms,
-        max_error=max_err,
-        params={
-            "center": center,
-            "ax": ax, "ay": ay, "az": az,
-            "hx": float(half[0]), "hy": float(half[1]), "hz": float(half[2]),
-            "_scale": scale,
-        },
-        summary=f"Box · {2*half[0]:.3g}×{2*half[1]:.3g}×{2*half[2]:.3g}",
-    )
+    params = {
+        "center": center,
+        "ax": ax, "ay": ay, "az": az,
+        "hx": float(half[0]), "hy": float(half[1]), "hz": float(half[2]),
+        "_scale": scale,
+    }
+    return FitResult(kind="BOX", rms=rms, max_error=max_err, params=params,
+                     summary=summarize("BOX", params))
 
 
 def predicted_normals(result: FitResult, pts: np.ndarray) -> np.ndarray:
@@ -415,6 +513,45 @@ def predicted_normals(result: FitResult, pts: np.ndarray) -> np.ndarray:
     raise ValueError(result.kind)
 
 
+def signed_distances(result: FitResult, pts: np.ndarray) -> np.ndarray:
+    """Per-point signed residual the fitted primitive implies at ``pts``.
+
+    The sibling of :func:`predicted_normals`: where that returns the predicted
+    *normal* per point, this returns the *deviation* per point. It reproduces the
+    exact residual each fitter measures internally — the codebase otherwise keeps
+    only the aggregate ``(rms, max_error)`` — so ``rms(signed_distances(r, r_pts))``
+    recovers ``r.rms``. Used by the fit-quality heatmap and the RANSAC wrapper.
+    """
+    p = result.params
+    pts = np.asarray(pts, dtype=float)
+    if result.kind == "PLANE":
+        return (pts - np.asarray(p["point"])) @ _unit(np.asarray(p["normal"]))
+    if result.kind == "SPHERE":
+        return np.linalg.norm(pts - np.asarray(p["center"]), axis=1) - p["radius"]
+    if result.kind in ("CYLINDER", "FILLET"):
+        rel = pts - np.asarray(p["base"])
+        axis = _unit(np.asarray(p["axis"]))
+        w = rel @ axis
+        rho = np.linalg.norm(rel - np.outer(w, axis), axis=1)
+        return rho - p["radius"]
+    if result.kind == "CONE":
+        rel = pts - np.asarray(p["apex"])
+        axis = _unit(np.asarray(p["axis"]))
+        w = rel @ axis
+        perp = np.linalg.norm(rel - np.outer(w, axis), axis=1)
+        slope = float(np.tan(p["half_angle"]))
+        return perp - slope * w           # matches fit_cone's radial residual
+    if result.kind == "TORUS":
+        _, _, dist = _torus_on_axis(pts, np.asarray(p["center"]), np.asarray(p["axis"]))
+        return dist
+    if result.kind == "BOX":
+        axes = [_unit(np.asarray(p["ax"])), _unit(np.asarray(p["ay"])), _unit(np.asarray(p["az"]))]
+        half = np.array([p["hx"], p["hy"], p["hz"]])
+        local = np.column_stack([(pts - np.asarray(p["center"])) @ a for a in axes])
+        return np.min(half - np.abs(local), axis=1)   # matches fit_box's surf_dist
+    raise ValueError(result.kind)
+
+
 def _unit(v):
     n = float(np.linalg.norm(v))
     return v / n if n > 1e-12 else v
@@ -453,13 +590,19 @@ _GOOD_FIT = 1e-3
 _PREFERENCE = {"PLANE": 0, "BOX": 1, "CYLINDER": 2, "CONE": 3, "SPHERE": 4, "TORUS": 5}
 
 
-def fit_auto(region: Region) -> FitResult | None:
+def fit_auto(region: Region, return_candidates: bool = False):
     """Try every primitive and return the best fit.
 
     Selection order:
       1. Drop fits whose predicted normals disagree with the face normals.
       2. Among fits that are essentially exact, prefer the simplest primitive.
       3. Otherwise take the lowest relative RMS.
+
+    With ``return_candidates=True`` returns ``(best, candidates)`` where
+    ``candidates`` is every successful fit annotated with its agreement metrics,
+    sorted best-first (winner, then ascending relative RMS) — for surfacing the
+    runner-ups and the tie-break margin in the UI. ``best`` is ``None`` only when
+    no primitive fit at all.
     """
     candidates = []
     for fitter in FITTERS.values():
@@ -470,12 +613,111 @@ def fit_auto(region: Region) -> FitResult | None:
         if res is not None:
             candidates.append(res)
     if not candidates:
-        return None
+        return (None, []) if return_candidates else None
 
     aligned = [r for r in candidates if normal_alignment(r, region) >= _ALIGNMENT_GATE]
     pool = aligned if aligned else candidates
 
     good = [r for r in pool if r.rel_rms < _GOOD_FIT]
     if good:
-        return min(good, key=lambda r: _PREFERENCE[r.kind])
-    return min(pool, key=lambda r: r.rel_rms)
+        best = min(good, key=lambda r: _PREFERENCE[r.kind])
+    else:
+        best = min(pool, key=lambda r: r.rel_rms)
+
+    if not return_candidates:
+        return best
+
+    annotated = [
+        {
+            "kind": r.kind,
+            "rel_rms": r.rel_rms,
+            "alignment": normal_alignment(r, region),
+            "gated": r in pool,
+            "winner": r is best,
+            "result": r,
+        }
+        for r in candidates
+    ]
+    annotated.sort(key=lambda c: (not c["winner"], c["rel_rms"]))
+    return best, annotated
+
+
+# Points/faces beyond this fraction of the region size are outliers. A fit this
+# clean already (relative RMS) is left untouched — RANSAC only kicks in when the
+# plain fit is poor, preserving machine-precision fits on clean selections.
+RANSAC_REL_THRESHOLD = 0.02
+_RANSAC_CLEAN = 1e-3
+_RANSAC_ITERS = 80
+_RANSAC_SAMPLE = 14          # small sample → decent odds of an outlier-free draw
+
+
+def _trim_to_inliers(region, result, thr):
+    """Region restricted to points/faces within ``thr`` of the fitted surface."""
+    p_mask = np.abs(signed_distances(result, region.points)) <= thr
+    if len(region.face_points):
+        f_mask = np.abs(signed_distances(result, region.face_points)) <= thr
+        fp = region.face_points[f_mask]
+        fn = region.face_normals[f_mask]
+    else:
+        f_mask = np.ones(0, dtype=bool)
+        fp, fn = region.face_points, region.face_normals
+    return Region(points=region.points[p_mask], face_points=fp, face_normals=fn), p_mask, f_mask
+
+
+def fit_robust(region: Region, fitter, rel_threshold=RANSAC_REL_THRESHOLD,
+               iters=_RANSAC_ITERS, seed=0) -> FitResult | None:
+    """Outlier-tolerant fit via RANSAC consensus, then a clean refit.
+
+    A few stray triangles in a selection (a chamfer, an N-gon that triangulated
+    oddly) drag a plain least-squares fit off — and trimming can't recover, since
+    the corrupted fit mis-ranks which points are outliers. Instead this fits many
+    small random samples, keeps the model with the most inliers (within
+    ``rel_threshold × region size``), and refits on that consensus set. Rejected
+    faces show up red in the fit-quality heatmap.
+
+    A selection that already fits cleanly is returned unchanged, so the
+    machine-precision behaviour on clean meshes is never disturbed.
+    """
+    base = fitter(region)
+    if base is None:
+        return None
+    if base.rel_rms < _RANSAC_CLEAN:
+        return base                                  # already excellent; no outliers
+
+    n_pts = len(region.points)
+    n_faces = len(region.face_points)
+    thr = rel_threshold * region_scale(region.points)
+    rng = np.random.default_rng(seed)
+    s_pts = min(n_pts, _RANSAC_SAMPLE)
+    s_faces = min(n_faces, _RANSAC_SAMPLE) if n_faces else 0
+
+    best_count, best_cand = -1, None
+    for _ in range(iters):
+        pid = rng.choice(n_pts, size=s_pts, replace=False)
+        if n_faces:
+            fid = rng.choice(n_faces, size=s_faces, replace=False)
+            sub = Region(points=region.points[pid],
+                         face_points=region.face_points[fid],
+                         face_normals=region.face_normals[fid])
+        else:
+            sub = Region(points=region.points[pid],
+                         face_points=region.face_points, face_normals=region.face_normals)
+        cand = fitter(sub)
+        if cand is None:
+            continue
+        count = int((np.abs(signed_distances(cand, region.points)) <= thr).sum())
+        if count > best_count:
+            best_count, best_cand = count, cand
+
+    # No usable consensus, or the best model already keeps everything (no outliers).
+    if best_cand is None or best_count >= n_pts:
+        return base
+
+    # Trim the full region (points AND faces) by the consensus model, then refit
+    # cleanly on the inliers — so outlier normals can't corrupt the final axis.
+    trimmed, p_mask, _ = _trim_to_inliers(region, best_cand, thr)
+    if len(trimmed.points) >= 3:
+        final = fitter(trimmed)
+        if final is not None:
+            return final
+    return base

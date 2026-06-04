@@ -48,6 +48,9 @@ class REVERSE_PT_main(Panel):
             box.label(text="Enter Edit Mode and select faces", icon="INFO")
         else:
             layout.operator("reverse.fit_selection", icon="SHADERFX")
+            row = layout.row(align=True)
+            row.operator("reverse.select_similar", icon="FACESEL", text="Select Similar")
+            row.prop(settings, "select_similar_angle", text="")
 
         box = layout.box()
         box.label(text="Segmentation", icon="MOD_EDGESPLIT")
@@ -63,6 +66,19 @@ class REVERSE_PT_main(Panel):
         sub.enabled = settings.create_object
         sub.prop(settings, "segments")
         box.prop(settings, "tolerance")
+        box.prop(settings, "show_heatmap")
+
+        box.prop(settings, "use_ransac")
+        rsub = box.column(align=True)
+        rsub.enabled = settings.use_ransac
+        rsub.prop(settings, "ransac_threshold")
+
+        box.prop(settings, "snap_enabled")
+        snap = box.column(align=True)
+        snap.enabled = settings.snap_enabled
+        snap.prop(settings, "snap_preset", text="Snap to")
+        if settings.snap_preset == "CUSTOM":
+            snap.prop(settings, "snap_step")
 
 
 class REVERSE_PT_features(Panel):
@@ -77,12 +93,20 @@ class REVERSE_PT_features(Panel):
         layout = self.layout
         settings = context.scene.reverse
 
-        layout.template_list(
+        list_row = layout.row()
+        list_row.template_list(
             "REVERSE_UL_features", "",
             settings, "features",
             settings, "active_feature",
             rows=4,
         )
+        # Reorder / re-fit / delete the stack — non-destructive editing column.
+        col = list_row.column(align=True)
+        col.operator("reverse.move_feature", text="", icon="TRIA_UP").direction = "UP"
+        col.operator("reverse.move_feature", text="", icon="TRIA_DOWN").direction = "DOWN"
+        col.separator()
+        col.operator("reverse.refit_feature", text="", icon="FILE_REFRESH")
+        col.operator("reverse.remove_feature", text="", icon="X")
 
         row = layout.row(align=True)
         row.operator("reverse.set_operation", text="Add", icon="ADD").operation = "ADD"
@@ -100,6 +124,9 @@ class REVERSE_PT_features(Panel):
         row.operator("reverse.select_feature_object", icon="RESTRICT_SELECT_OFF", text="Select")
         row.operator("reverse.clear_features", icon="TRASH", text="Clear")
 
+        layout.operator("reverse.propagate_pattern", icon="MOD_ARRAY",
+                        text="Propagate Pattern (find matching holes)")
+
         if 0 <= settings.active_feature < len(settings.features):
             item = settings.features[settings.active_feature]
             box = layout.box()
@@ -110,6 +137,18 @@ class REVERSE_PT_features(Panel):
             role_txt = f"{role} · {item.cut_mode.title()}" if item.operation == "SUBTRACT" else role
             box.label(text=f"Role: {role_txt}",
                       icon="REMOVE" if item.operation == "SUBTRACT" else "ADD")
+            if item.runner_up:
+                box.label(text=f"Auto: {item.runner_up}", icon="SHADERFX")
+            if item.kind in {"CYLINDER", "CONE"}:
+                box.prop(item, "thread_spec", icon="MOD_SCREW")
+            if item.kind == "CYLINDER" and item.operation == "SUBTRACT":
+                box.prop(item, "hole_preset")
+                if item.hole_preset == "COUNTERBORE":
+                    box.prop(item, "cbore_radius")
+                    box.prop(item, "cbore_depth")
+                elif item.hole_preset == "COUNTERSINK":
+                    box.prop(item, "cbore_radius", text="Countersink radius")
+                    box.prop(item, "csink_angle")
 
         box = layout.box()
         box.label(text="Export", icon="EXPORT")
@@ -128,7 +167,29 @@ class REVERSE_PT_features(Panel):
             col.operator("reverse.install_occt", icon="IMPORT")
 
 
-classes = (REVERSE_UL_features, REVERSE_PT_main, REVERSE_PT_features)
+class REVERSE_PT_report(Panel):
+    bl_label = "Validation Report"
+    bl_idname = "REVERSE_PT_report"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Reverse"
+    bl_parent_id = "REVERSE_PT_main"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        layout = self.layout
+        report = context.scene.reverse.last_report
+        if not report:
+            layout.label(text="Export a STEP file to see validation", icon="INFO")
+            return
+        box = layout.box()
+        for line in report.split("\n"):
+            icon = "CHECKMARK" if ("valid" in line and "INVALID" not in line) or "✓" in line \
+                else ("ERROR" if ("INVALID" in line or "NOT watertight" in line) else "DOT")
+            box.label(text=line, icon=icon)
+
+
+classes = (REVERSE_UL_features, REVERSE_PT_main, REVERSE_PT_features, REVERSE_PT_report)
 
 
 def register():

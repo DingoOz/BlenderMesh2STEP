@@ -14,6 +14,7 @@ kernel-grade AP242 file. Same feature schema as :func:`step_export.build_step`.
 from __future__ import annotations
 
 import importlib
+import math
 
 from .step_export import _add, _cross, _perp, _scale, _sub, _unit  # geometry helpers
 
@@ -49,6 +50,49 @@ def _imp(module, *names):
         except Exception as exc:  # pragma: no cover - depends on which binding
             last = exc
     raise ImportError(f"Cannot import {names} from {module}: {last}")
+
+
+class ExportReport(str):
+    """The export status string, carrying structured validation data.
+
+    Subclasses ``str`` so every existing caller that logs or substring-tests the
+    status keeps working, while :mod:`reverse_mesh.operators` can read the
+    per-solid ``volumes``/validity to fill the validation report panel.
+    """
+
+    def __new__(cls, summary, *, solids=(), free_edges=None,
+                watertight=None, valid=None, backend=""):
+        obj = super().__new__(cls, summary)
+        obj.solids = list(solids)          # [{"index", "volume", "valid"}]
+        obj.free_edges = free_edges        # int, or None if no watertight pass
+        obj.watertight = watertight        # True/False/None
+        obj.valid = valid                  # whole-shape BRepCheck validity
+        obj.backend = backend
+        return obj
+
+
+def _solid_report(shape):
+    """Per-solid (volume, validity) for every TopAbs_SOLID in ``shape``."""
+    (TopExp_Explorer,) = _imp("TopExp", "TopExp_Explorer")
+    (TopAbs_SOLID,) = _imp("TopAbs", "TopAbs_SOLID")
+    (GProp_GProps,) = _imp("GProp", "GProp_GProps")
+    (BRepGProp,) = _imp("BRepGProp", "BRepGProp")
+    (BRepCheck_Analyzer,) = _imp("BRepCheck", "BRepCheck_Analyzer")
+    out = []
+    exp = TopExp_Explorer(shape, TopAbs_SOLID)
+    i = 0
+    while exp.More():
+        s = exp.Current()
+        props = GProp_GProps()
+        BRepGProp.VolumeProperties_s(s, props)
+        try:
+            valid = bool(BRepCheck_Analyzer(s).IsValid())
+        except Exception:
+            valid = False
+        out.append({"index": i, "volume": float(props.Mass()), "valid": valid})
+        i += 1
+        exp.Next()
+    return out
 
 
 def _grow_cutter(kind, p, frac, ends="BOTH"):
@@ -93,6 +137,37 @@ def _grow_cutter(kind, p, frac, ends="BOTH"):
     return q
 
 
+def _expand_preset(p):
+    """Extra coaxial cutter(s) for a counterbore/countersink hole, or [].
+
+    A preset hole is a base through-cylinder (cut normally) plus a wider recess at
+    its open (+axis) end: a flat-bottomed cylinder for a counterbore, or a tapered
+    cone for a countersink. Returns ``[(kind, params, grow_ends)]`` to subtract in
+    addition to the base hole.
+    """
+    preset = p.get("hole_preset", "NONE")
+    if preset not in ("COUNTERBORE", "COUNTERSINK"):
+        return []
+    axis = _unit(tuple(float(c) for c in p["axis"]))
+    h = float(p["height"])
+    r = float(p["radius"])
+    high_end = _add(tuple(float(c) for c in p["base"]), _scale(axis, h / 2.0))
+    cr = float(p.get("cbore_radius", 2.0 * r))
+    if cr <= r:
+        return []                                    # recess must be wider than the hole
+
+    if preset == "COUNTERBORE":
+        cd = float(p.get("cbore_depth", 0.25 * h))
+        c_mid = _sub(high_end, _scale(axis, cd / 2.0))
+        return [("CYLINDER", {"base": c_mid, "axis": axis, "radius": cr, "height": cd}, "HIGH")]
+
+    # COUNTERSINK: cone wide at the surface, narrowing to the hole radius inward.
+    half = math.radians(float(p.get("csink_angle", 90.0))) / 2.0
+    depth = (cr - r) / math.tan(half) if math.tan(half) > 1e-9 else 0.25 * h
+    return [("CONE", {"base": high_end, "axis": _scale(axis, -1.0),
+                      "radius1": cr, "radius2": r, "height": depth}, "LOW")]
+
+
 def _cutter_end_centers(kind, p):
     """World-space centres of a cutter's two end caps, as (low, high) or None."""
     axis = _unit(tuple(float(c) for c in p["axis"]))
@@ -104,6 +179,20 @@ def _cutter_end_centers(kind, p):
         base = tuple(float(c) for c in p["base"])
         return base, _add(base, _scale(axis, p["height"]))
     return None
+
+
+def _unify(shape):
+    """Merge coincident faces/edges of a fused shape into shared topology.
+
+    After fusing abutting solids, OCCT leaves their touching faces split along the
+    old boundaries (independent edges). ``ShapeUpgrade_UnifySameDomain`` collapses
+    coplanar faces and coincident edges so neighbours genuinely share edges —
+    turning two fused boxes into one box with 6 faces, not 10.
+    """
+    (Unify,) = _imp("ShapeUpgrade", "ShapeUpgrade_UnifySameDomain")
+    u = Unify(shape, True, True, True)   # unify edges, unify faces, concat b-splines
+    u.Build()
+    return u.Shape()
 
 
 def _make_watertight(shape, tol):
@@ -154,13 +243,14 @@ def _make_watertight(shape, tol):
 
 
 def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
-           watertight=False, sew_tol=0.01):
+           watertight=False, sew_tol=0.01, auto_stitch=False):
     """Build OCCT solids from ``features`` and write an AP242 STEP file.
 
     Returns a short status string. If ``merge`` is set, all solids are fused into
     a single body before writing (planes are added alongside as faces). Subtractive
     cylinders/cones are extended by ``overshoot`` (fraction per end) so their ends
-    cut cleanly through coplanar faces.
+    cut cleanly through coplanar faces. ``auto_stitch`` fuses the additive solids
+    and unifies their coincident faces into shared topology (best-effort).
     """
     (gp_Pnt, gp_Dir, gp_Ax2, gp_Ax3, gp_Pln) = _imp(
         "gp", "gp_Pnt", "gp_Dir", "gp_Ax2", "gp_Ax3", "gp_Pln")
@@ -232,7 +322,7 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
     if not adds and not cutters and not faces:
         raise ValueError("No exportable shapes")
 
-    do_bool = merge or bool(cutters)
+    do_bool = merge or auto_stitch or bool(cutters)
     parts = list(faces)
     note = ""
     if do_bool and adds:
@@ -251,8 +341,21 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
                 continue
             base = Cut(base, cutter).Shape()
             n_cut += 1
+            # Counterbore / countersink: subtract the extra recess at the open end.
+            for sk, sp, sgrow_ends in _expand_preset(p):
+                sub_shape, _ = build(sk, _grow_cutter(sk, sp, overshoot, sgrow_ends))
+                if sub_shape is not None:
+                    base = Cut(base, sub_shape).Shape()
+        if auto_stitch:
+            try:
+                base = _unify(base)
+                note_stitch = " — stitched (shared topology)"
+            except Exception as exc:
+                note_stitch = f" — stitch failed: {exc}"
+        else:
+            note_stitch = ""
         parts.append(base)
-        note = f"1 body (+{len(adds)} / -{n_cut})"
+        note = f"1 body (+{len(adds)} / -{n_cut}){note_stitch}"
     else:
         # No base to cut from: export everything separately (overshoot is moot).
         for feat in cutters:
@@ -271,10 +374,13 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
     for part in parts:
         builder.Add(compound, part)
 
+    free_edges = None
+    watertight_ok = None
     if watertight:
         try:
             healed, n_solids, free_edges = _make_watertight(compound, sew_tol)
             compound = healed
+            watertight_ok = free_edges == 0
             if free_edges == 0:
                 note += f" — watertight ({n_solids} closed solid(s))"
             else:
@@ -293,7 +399,18 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
     if writer.Write(filepath) != IFSelect_RetDone:
         raise RuntimeError("STEPControl_Writer.Write failed")
 
-    return f"{note} + {len(faces)} face(s) via {backend_name()}"
+    # Validation report: per-solid volume + validity, surfaced to the user.
+    try:
+        solids = _solid_report(compound)
+        (BRepCheck_Analyzer,) = _imp("BRepCheck", "BRepCheck_Analyzer")
+        all_valid = bool(BRepCheck_Analyzer(compound).IsValid())
+    except Exception:
+        solids, all_valid = [], None
+
+    summary = f"{note} + {len(faces)} face(s) via {backend_name()}"
+    return ExportReport(summary, solids=solids, free_edges=free_edges,
+                        watertight=watertight_ok, valid=all_valid,
+                        backend=backend_name())
 
 
 def _make_shape(kind, p, gp_Pnt, gp_Dir, gp_Ax3, gp_Pln,
@@ -327,6 +444,18 @@ def _make_shape(kind, p, gp_Pnt, gp_Dir, gp_Ax3, gp_Pln,
         e1 = tuple(float(x) for x in p["e1"])
         pln = gp_Pln(gp_Ax3(gp_Pnt(*c), gp_Dir(*n), gp_Dir(*e1)))
         face = MakeFace(pln, -p["half_u"], p["half_u"], -p["half_v"], p["half_v"]).Face()
+        return face, False
+    if kind == "FILLET":
+        # Trimmed cylindrical patch: u = arc angle [u_min, u_max], v = axial extent.
+        (Geom_CylindricalSurface,) = _imp("Geom", "Geom_CylindricalSurface")
+        axis = _unit(tuple(p["axis"]))
+        ref = _unit(tuple(p["ref"]))
+        base = tuple(float(c) for c in p["base"])
+        h = p["height"]
+        ax3 = gp_Ax3(gp_Pnt(*base), gp_Dir(*[float(c) for c in axis]),
+                     gp_Dir(*[float(c) for c in ref]))
+        surf = Geom_CylindricalSurface(ax3, p["radius"])
+        face = MakeFace(surf, p["u_min"], p["u_max"], -h / 2.0, h / 2.0, 1e-6).Face()
         return face, False
     return None, False
 

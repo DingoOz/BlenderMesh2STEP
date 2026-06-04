@@ -161,6 +161,17 @@ class StepWriter:
 
 # --- per-primitive solids -----------------------------------------------------
 
+def _solid_name(base, p):
+    """A solid's STEP name, annotated with a thread spec when one is tagged.
+
+    The name is what CAD shows for the solid, so 'cylinder thread M8x1.25' makes
+    the thread visible without needing full AP242 semantic thread features.
+    """
+    spec = p.get("thread_spec")
+    name = f"{base} thread {spec}" if spec else base
+    return name.replace("'", "''")
+
+
 def _full_circle_edge(w, center, axis, ref, radius):
     """A closed circular edge (one vertex, start == end). Returns (edge, vertex)."""
     start = _add(center, _scale(ref, radius))
@@ -227,7 +238,49 @@ def _cylinder_item(w, p):
     top_f = w.advanced_face("cap", [w.face_outer_bound(
         w.edge_loop([w.oriented_edge(e_top, True)]), True)], pl_top, True)
 
-    return w.add(f"MANIFOLD_SOLID_BREP('cylinder',{w.closed_shell([lateral, bot, top_f])})"), True
+    return w.add(f"MANIFOLD_SOLID_BREP('{_solid_name('cylinder', p)}',"
+                 f"{w.closed_shell([lateral, bot, top_f])})"), True
+
+
+def _fillet_item(w, p):
+    """Edge fillet → a *trimmed* partial cylindrical face (an open surface patch).
+
+    Bounded by two partial-circle arcs (at the axial ends) and two straight seams
+    (at the angular ends u_min/u_max), wrapped in a surface model like a plane.
+    """
+    axis = _unit(tuple(p["axis"]))
+    e1 = _unit(tuple(p["ref"]))
+    e2 = _unit(_cross(axis, e1))
+    r, h = p["radius"], p["height"]
+    u0, u1 = p["u_min"], p["u_max"]
+    base = tuple(p["base"])
+    c_bot = _sub(base, _scale(axis, h / 2.0))
+    c_top = _add(base, _scale(axis, h / 2.0))
+
+    def on_arc(center, u):
+        d = _add(_scale(e1, math.cos(u)), _scale(e2, math.sin(u)))
+        return _add(center, _scale(d, r))
+
+    pb0, pb1 = on_arc(c_bot, u0), on_arc(c_bot, u1)
+    pt0, pt1 = on_arc(c_top, u0), on_arc(c_top, u1)
+    vb0, vb1 = w.vertex(pb0), w.vertex(pb1)
+    vt0, vt1 = w.vertex(pt0), w.vertex(pt1)
+
+    arc_bot = w.edge_curve(vb0, vb1, w.circle(w.axis2(c_bot, axis, e1), r), True)
+    arc_top = w.edge_curve(vt0, vt1, w.circle(w.axis2(c_top, axis, e1), r), True)
+    seam0 = w.edge_curve(vb0, vt0, w.line(pb0, axis), True)
+    seam1 = w.edge_curve(vb1, vt1, w.line(pb1, axis), True)
+
+    surf = w.add(f"CYLINDRICAL_SURFACE('',{w.axis2(c_bot, axis, e1)},{_num(r)})")
+    loop = w.edge_loop([
+        w.oriented_edge(arc_bot, True),
+        w.oriented_edge(seam1, True),
+        w.oriented_edge(arc_top, False),
+        w.oriented_edge(seam0, False),
+    ])
+    face = w.advanced_face("fillet", [w.face_outer_bound(loop, True)], surf, True)
+    model = w.add(f"SHELL_BASED_SURFACE_MODEL('',({w.open_shell([face])}))")
+    return model, False
 
 
 def _cone_item(w, p):
@@ -285,7 +338,7 @@ def _cone_item(w, p):
             w.edge_loop([w.oriented_edge(e_top, True)]), True)], pl_top, True)
         shell = w.closed_shell([lateral, bot, top_f])
 
-    return w.add(f"MANIFOLD_SOLID_BREP('cone',{shell})"), True
+    return w.add(f"MANIFOLD_SOLID_BREP('{_solid_name('cone', p)}',{shell})"), True
 
 
 def _sphere_item(w, p):
@@ -401,18 +454,20 @@ _BUILDERS = {
     "CONE": _cone_item,
     "SPHERE": _sphere_item,
     "TORUS": _torus_item,
+    "FILLET": _fillet_item,
 }
 
 
 # --- top-level assembly + product structure -----------------------------------
 
 def build_step(features, *, unit="MM", product_name="Reverse",
-               author="", organization="", timestamp="", filename=""):
+               author="", organization="", timestamp="", filename="", pmi=False):
     """Return the full STEP file text for ``features``.
 
     ``unit`` is one of 'MM', 'M', 'IN' (controls only the declared SI unit/prefix;
     coordinates are written as given). Items are assembled into one shape
-    representation with colour styling.
+    representation with colour styling. With ``pmi=True`` each feature-of-size also
+    gets a semantic AP242 dimension (DIMENSIONAL_SIZE) carrying its nominal value.
     """
     w = StepWriter()
 
@@ -429,7 +484,7 @@ def build_step(features, *, unit="MM", product_name="Reverse",
         styled.append(_style(w, item_id, color))
 
     # Geometric context with units + uncertainty.
-    ctx = _units_context(w, unit)
+    ctx, length_unit = _units_context(w, unit)
 
     # Representation: advanced brep if everything is a solid, else generic.
     all_solid = all(s for _, s in items) and bool(items)
@@ -447,7 +502,10 @@ def build_step(features, *, unit="MM", product_name="Reverse",
             + ",".join(str(s) for s in styled) + f"),{ctx})"
         )
 
-    _product_structure(w, rep, product_name)
+    _product, pds = _product_structure(w, rep, product_name)
+
+    if pmi:
+        _semantic_dimensions(w, features, pds, ctx, length_unit)
 
     header = _header(filename, author, organization, timestamp)
     return f"{header}\nDATA;\n{w.text()}\nENDSEC;\nEND-ISO-10303-21;\n"
@@ -466,6 +524,7 @@ def _style(w, item_id, color):
 
 
 def _units_context(w, unit):
+    """Return ``(context_id, length_unit_id)`` — the latter for PMI measures."""
     prefix = {"MM": ".MILLI.", "M": "$", "IN": ".MILLI."}.get(unit, ".MILLI.")
     length = w.add(f"( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT({prefix},.METRE.) )")
     angle = w.add("( NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.) )")
@@ -474,12 +533,43 @@ def _units_context(w, unit):
         f"UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-06),{length},"
         "'distance_accuracy_value','confusion accuracy')"
     )
-    return w.add(
+    ctx = w.add(
         f"( GEOMETRIC_REPRESENTATION_CONTEXT(3) "
         f"GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT(({unc})) "
         f"GLOBAL_UNIT_ASSIGNED_CONTEXT(({length},{angle},{solid})) "
         f"REPRESENTATION_CONTEXT('Context','3D Context with UNIT and UNCERTAINTY') )"
     )
+    return ctx, length
+
+
+def _semantic_dimensions(w, features, pds, ctx, length_unit):
+    """Emit AP242 semantic PMI: a DIMENSIONAL_SIZE per feature-of-size.
+
+    Each becomes a SHAPE_ASPECT on the product definition shape, a DIMENSIONAL_SIZE
+    naming it, and a SHAPE_DIMENSION_REPRESENTATION carrying the nominal value —
+    so a CAD package reads the diameter/length as semantic, queryable PMI rather
+    than just geometry. Returns the number of dimensions written.
+    """
+    n = 0
+    for feat in features:
+        kind = feat["kind"]
+        p = feat["params"]
+        dims = []                                       # (label, value)
+        if kind in ("CYLINDER", "FILLET", "SPHERE"):
+            dims.append(("diameter", 2.0 * p["radius"]))
+        elif kind == "CONE":
+            dims.append(("diameter", 2.0 * max(p["radius1"], p["radius2"])))
+        elif kind == "TORUS":
+            dims.append(("diameter", 2.0 * p["minor_radius"]))
+        for label, value in dims:
+            sa = w.add(f"SHAPE_ASPECT('{label}','',{pds},.T.)")
+            ds = w.add(f"DIMENSIONAL_SIZE({sa},'{label}')")
+            mri = w.add(f"MEASURE_REPRESENTATION_ITEM('{label}',"
+                        f"LENGTH_MEASURE({_num(value)}),{length_unit})")
+            sdr = w.add(f"SHAPE_DIMENSION_REPRESENTATION('',({mri}),{ctx})")
+            w.add(f"DIMENSIONAL_CHARACTERISTIC_REPRESENTATION({ds},{sdr})")
+            n += 1
+    return n
 
 
 def _product_structure(w, rep, name):
@@ -498,7 +588,7 @@ def _product_structure(w, rep, name):
     pd = w.add(f"PRODUCT_DEFINITION('design','',{pdf},{pd_ctx})")
     pds = w.add(f"PRODUCT_DEFINITION_SHAPE('','',{pd})")
     w.add(f"SHAPE_DEFINITION_REPRESENTATION({pds},{rep})")
-    return product
+    return product, pds
 
 
 def _header(filename, author, organization, timestamp):
