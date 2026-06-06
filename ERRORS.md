@@ -99,3 +99,13 @@
 - **Root cause:** FILLET was added as a special-case fit (outside `FITTERS`) and `predicted_normals` was never extended to cover it; the trimmed partial-cylinder shares the cylinder's radial normal but has no branch.
 - **Fix applied:** In `decompose.py` the alignment gate routes FILLET through a local `_fillet_alignment` that computes the radial (cylinder-like) normal directly, and only calls `normal_alignment` for the other kinds.
 - **Prevention rule:** Before calling `predicted_normals`/`normal_alignment` on a `FitResult` of unknown kind, guard for FILLET (and any future non-`FITTERS` kind). Better long-term: add a FILLET branch to `predicted_normals` (radial normal, same as CYLINDER) so the helpers are total over all kinds.
+
+### Plane patch sized by arbitrary-axis bounding box overshoots the region — 2026-06-06
+
+- **Severity:** Medium
+- **Category:** Logic
+- **File(s):** `reverse_mesh/fitting/primitives.py`
+- **Pattern:** Representing a fitted planar patch as a rectangle sized along *arbitrary* axes (e.g. `orthonormal_basis(normal)`, seeded from a world axis) via a centroid-centred axis-aligned bounding box. For an elongated or diagonally-oriented region the rectangle is far larger than the region; its empty corners extend past the true surface, so the exported flat patch visibly juts outside the volume on elongated/freeform parts (a plain sphere was fine — one exact primitive — but a stretched one fragmented into oversized plane patches).
+- **Root cause:** The quad's in-plane axes were not aligned to the data, and its extent was the symmetric max-abs about the centroid, so a thin diagonal patch got a large square-ish bounding box.
+- **Fix applied:** Align the in-plane axes to the region's principal directions (SVD of the points projected into the plane), size the quad to the actual per-axis min/max, and centre it on that bounding rectangle (a shift that stays within the fitted plane, so residuals/normal are unchanged).
+- **Prevention rule:** When turning a fitted region into a bounded patch, derive the patch frame from the data (PCA/principal axes), not from a fixed world seed, and size it to the real min/max extent. Treat any centroid-centred, axis-arbitrary bounding box over a non-square region as an overshoot bug.
