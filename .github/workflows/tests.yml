@@ -38,5 +38,9 @@ jobs:
         working-directory: reverse_mesh
         run: python tests/test_decompose.py
 
+      - name: Volumetric solid-fit tests
+        working-directory: reverse_mesh
+        run: python tests/test_solidfit.py
+
       - name: Byte-compile all modules
         run: python -m compileall reverse_mesh

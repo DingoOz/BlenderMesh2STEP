@@ -281,6 +281,26 @@ class ReverseSettings(PropertyGroup):
         default=0.02, min=0.0, max=10.0, precision=4,
     )
 
+    # --- Whole-mesh solid/boolean decompose (volumetric, additive CSG) ---------
+    solid_resolution: IntProperty(
+        name="Volume resolution",
+        description=(
+            "Voxel resolution along the longest axis when sampling the solid's "
+            "volume. Higher is more accurate but much slower"
+        ),
+        default=40, min=12, max=128,
+    )
+    solid_max_primitives: IntProperty(
+        name="Max primitives",
+        description="Stop after fitting this many solids (union budget)",
+        default=16, min=1, max=64,
+    )
+    solid_min_coverage: FloatProperty(
+        name="Min coverage",
+        description="Warn if the union covers less than this fraction of the volume",
+        default=0.8, min=0.0, max=1.0, subtype="FACTOR",
+    )
+
     features: CollectionProperty(type=ReverseFeature)
     active_feature: IntProperty(name="Active feature", default=0)
 

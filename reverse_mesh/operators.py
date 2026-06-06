@@ -23,6 +23,7 @@ from .fitting import (
     snap_result, summarize,
 )
 from .fitting.common import deviation_color
+from .fitting.solidfit import SDFGrid, fit_solids
 
 
 def occt_lib_dir(create=False):
@@ -134,6 +135,7 @@ def _segment_faces(faces, angle_threshold_rad):
 
 
 AUTO_COLLECTION = "Reverse Auto"
+SOLID_COLLECTION = "Reverse Solid"
 
 
 def _snap_step(settings):
@@ -196,11 +198,11 @@ def _mesh_graph(obj):
     return graph
 
 
-def _ensure_auto_collection(context):
-    """Return (creating if needed) the dedicated 'Reverse Auto' collection."""
-    coll = bpy.data.collections.get(AUTO_COLLECTION)
+def _ensure_collection(context, name):
+    """Return (creating if needed) a scene collection by ``name``."""
+    coll = bpy.data.collections.get(name)
     if coll is None:
-        coll = bpy.data.collections.new(AUTO_COLLECTION)
+        coll = bpy.data.collections.new(name)
     if coll.name not in context.scene.collection.children:
         try:
             context.scene.collection.children.link(coll)
@@ -216,11 +218,11 @@ def _move_to_collection(obj, coll):
     coll.objects.link(obj)
 
 
-def _add_auto_feature(context, settings, result, obj):
-    """Append a feature for an auto-decomposed primitive, tagged group='AUTO'."""
+def _add_built_feature(context, settings, result, obj, group):
+    """Append a feature for a machine-built primitive, tagged with ``group``."""
     item = settings.features.add()
     item.kind = result.kind
-    item.group = "AUTO"
+    item.group = group
     item.summary = result.summary
     item.rms = result.rms
     item.max_error = result.max_error
@@ -801,7 +803,7 @@ class REVERSE_OT_auto_decompose(Operator):
             obj["reverse"]["group"] = "AUTO"
         except (KeyError, TypeError):
             pass
-        _add_auto_feature(context, s, result, obj)
+        _add_built_feature(context, s, result, obj, "AUTO")
 
     def invoke(self, context, event):
         wm = context.window_manager
@@ -818,7 +820,7 @@ class REVERSE_OT_auto_decompose(Operator):
         self._results = out.results
         self._i = 0
         self._built = 0
-        self._coll = _ensure_auto_collection(context)
+        self._coll = _ensure_collection(context, AUTO_COLLECTION)
         self._timer = wm.event_timer_add(0.01, window=context.window)
         wm.modal_handler_add(self)
         return {"RUNNING_MODAL"}
@@ -870,7 +872,7 @@ class REVERSE_OT_auto_decompose(Operator):
         if not out.results:
             self.report({"WARNING"}, self._empty_message(context, out))
             return {"CANCELLED"}
-        self._coll = _ensure_auto_collection(context)
+        self._coll = _ensure_collection(context, AUTO_COLLECTION)
         self._built = 0
         for r in out.results:
             self._build_one(context, r)
@@ -906,6 +908,156 @@ class REVERSE_OT_clear_auto_set(Operator):
                 s.features.remove(i)
         s.active_feature = min(s.active_feature, max(0, len(s.features) - 1))
         self.report({"INFO"}, f"Cleared {len(removed)} auto primitives")
+        return {"FINISHED"}
+
+
+def _non_manifold_edges(obj):
+    """Count edges that aren't shared by exactly two faces (watertightness proxy)."""
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    n = sum(1 for e in bm.edges if len(e.link_faces) != 2)
+    bm.free()
+    return n
+
+
+def _signed_distance_grid(obj, resolution, progress=None):
+    """Sample a signed-distance field of ``obj``'s solid onto a world-space grid.
+
+    Positive inside, negative outside — the sign comes from the nearest surface
+    normal (``closest_point_on_mesh``), so it is only reliable on a watertight mesh
+    with consistent normals (the operator warns otherwise). Distances are measured
+    in world space so object scale is honoured.
+    """
+    mw = obj.matrix_world
+    mwi = mw.inverted_safe()
+    nmat = mw.to_3x3().inverted_safe().transposed()
+
+    corners = np.array([tuple(mw @ Vector(c)) for c in obj.bound_box], dtype=float)
+    lo = corners.min(axis=0)
+    hi = corners.max(axis=0)
+    diag = float(np.linalg.norm(hi - lo)) or 1.0
+    pad = 0.03 * diag
+    lo -= pad
+    hi += pad
+    spacing = max((hi - lo).max() / max(resolution, 1), 1e-6)
+    ns = (np.ceil((hi - lo) / spacing).astype(int) + 1)
+    nx, ny, nz = (int(n) for n in ns)
+
+    xs = lo[0] + np.arange(nx) * spacing
+    ys = lo[1] + np.arange(ny) * spacing
+    zs = lo[2] + np.arange(nz) * spacing
+    sd = np.empty((nx, ny, nz), dtype=float)
+    for i in range(nx):
+        for j in range(ny):
+            for k in range(nz):
+                pw = Vector((xs[i], ys[j], zs[k]))
+                ok, loc, nrm, _ = obj.closest_point_on_mesh(mwi @ pw)
+                if not ok:
+                    sd[i, j, k] = -1e18
+                    continue
+                d = pw - (mw @ loc)
+                dist = d.length
+                nw = nmat @ nrm
+                sd[i, j, k] = -dist if d.dot(nw) > 0.0 else dist
+        if progress is not None:
+            progress(0.05 + 0.6 * (i + 1) / nx)
+    return SDFGrid(sd=sd, origin=lo, spacing=spacing)
+
+
+class REVERSE_OT_solid_decompose(Operator):
+    """Whole-mesh SOLID decomposition (HEAVY / EXPERIMENTAL)
+
+    Approximates the mesh's *volume* as a union of solid primitives (sphere /
+    cylinder / box) — additive CSG — instead of fitting surface patches. A capsule
+    comes back as cylinder + 2 spheres regardless of tessellation, and nothing juts
+    outside the surface (every primitive is inscribed in the volume). The solids are
+    built into the 'Reverse Solid' collection; export with the OCCT backend's
+    'Merge into one solid' to boolean-union them into one watertight body.
+
+    Needs a watertight mesh with consistent normals to read inside/outside reliably.
+    """
+
+    bl_idname = "reverse.solid_decompose"
+    bl_label = "Auto-Decompose Solid (Boolean)"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and obj.type == "MESH"
+
+    def execute(self, context):
+        s = context.scene.reverse
+        obj = context.active_object
+        if obj.mode == "EDIT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+
+        nm = _non_manifold_edges(obj)
+        wm = context.window_manager
+        context.window.cursor_set("WAIT")
+        wm.progress_begin(0, 100)
+        try:
+            grid = _signed_distance_grid(
+                obj, s.solid_resolution,
+                progress=lambda f: wm.progress_update(int(100 * f)))
+            results, coverage = fit_solids(
+                grid, max_primitives=s.solid_max_primitives,
+                progress=lambda f: wm.progress_update(int(100 * f)))
+        finally:
+            wm.progress_end()
+            context.window.cursor_set("DEFAULT")
+
+        if not results:
+            self.report({"WARNING"},
+                        "Solid decompose found nothing — is the mesh watertight "
+                        "with outward normals? Try a higher Volume resolution")
+            return {"CANCELLED"}
+
+        coll = _ensure_collection(context, SOLID_COLLECTION)
+        for r in results:
+            o = build.build_object(context, r, s.segments,
+                                   operation="ADD", cut_mode="THROUGH")
+            _move_to_collection(o, coll)
+            try:
+                o["reverse"]["group"] = "BOOL"
+            except (KeyError, TypeError):
+                pass
+            _add_built_feature(context, s, r, o, "BOOL")
+
+        msg = (f"Solid decompose: {len(results)} primitives, "
+               f"{coverage * 100:.0f}% volume covered")
+        if nm:
+            msg += f" · warning: mesh not watertight ({nm} open edges) — signs may be off"
+        level = ({"WARNING"} if coverage < s.solid_min_coverage or nm else {"INFO"})
+        self.report(level, msg)
+        return {"FINISHED"}
+
+
+class REVERSE_OT_clear_solid_set(Operator):
+    """Delete the solid/boolean primitives (the 'Reverse Solid' collection)"""
+
+    bl_idname = "reverse.clear_solid_set"
+    bl_label = "Clear Solid Set"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        coll = bpy.data.collections.get(SOLID_COLLECTION)
+        return coll is not None and len(coll.objects) > 0
+
+    def execute(self, context):
+        coll = bpy.data.collections.get(SOLID_COLLECTION)
+        s = context.scene.reverse
+        removed = {o.name for o in list(coll.objects)} if coll else set()
+        if coll:
+            for o in list(coll.objects):
+                bpy.data.objects.remove(o, do_unlink=True)
+        for i in range(len(s.features) - 1, -1, -1):
+            f = s.features[i]
+            if f.group == "BOOL" or f.object_name in removed:
+                s.features.remove(i)
+        s.active_feature = min(s.active_feature, max(0, len(s.features) - 1))
+        self.report({"INFO"}, f"Cleared {len(removed)} solid primitives")
         return {"FINISHED"}
 
 
@@ -1089,9 +1241,10 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
         name="Feature set",
         description="Which set of fitted primitives to export",
         items=[
-            ("ALL", "All", "Export both manually-fit and auto-decomposed primitives"),
+            ("ALL", "All", "Export every fitted primitive"),
             ("MANUAL", "Manual only", "Export only the hand-fit feature stack"),
-            ("AUTO", "Auto only", "Export only the whole-mesh auto-decomposed set"),
+            ("AUTO", "Auto only", "Export only the whole-mesh surface auto-decomposed set"),
+            ("BOOL", "Solid only", "Export only the volumetric solid/boolean set"),
         ],
         default="ALL",
     )
@@ -1281,6 +1434,8 @@ classes = (
     REVERSE_OT_fit_selection,
     REVERSE_OT_auto_decompose,
     REVERSE_OT_clear_auto_set,
+    REVERSE_OT_solid_decompose,
+    REVERSE_OT_clear_solid_set,
     REVERSE_OT_select_similar,
     REVERSE_OT_move_feature,
     REVERSE_OT_remove_feature,

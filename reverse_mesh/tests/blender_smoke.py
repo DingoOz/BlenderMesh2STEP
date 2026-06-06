@@ -394,6 +394,47 @@ def main():
         fail("clear_auto_set left AUTO features behind")
     print("[ok] clear auto set removed objects + features")
 
+    # Volumetric SOLID decompose: a capsule (sphere stretched into a pill) must
+    # come back as cylinder + 2 spheres in the 'Reverse Solid' collection, tagged
+    # BOOL, regardless of tessellation — the volume/boolean path.
+    from reverse_mesh.operators import SOLID_COLLECTION
+    bpy.ops.object.mode_set(mode="OBJECT")
+    bpy.ops.mesh.primitive_uv_sphere_add(segments=48, ring_count=32, radius=1.0,
+                                         location=(0.0, -60.0, 0.0))
+    cap = bpy.context.active_object
+    bpy.ops.object.mode_set(mode="EDIT")
+    cbm = bmesh.from_edit_mesh(cap.data)
+    for v in cbm.verts:
+        if v.co.z > 0.05:
+            v.co.z += 1.5
+        elif v.co.z < -0.05:
+            v.co.z -= 1.5
+    bmesh.update_edit_mesh(cap.data)
+    bpy.ops.object.mode_set(mode="OBJECT")
+    bpy.context.view_layer.objects.active = cap
+    settings.solid_resolution = 36
+    if bpy.ops.reverse.solid_decompose() != {"FINISHED"}:
+        fail("solid_decompose failed")
+    bfeats = [f for f in bpy.context.scene.reverse.features if f.group == "BOOL"]
+    bkinds = sorted(f.kind for f in bfeats)
+    print(f"[ok] solid decompose → {len(bfeats)} BOOL prims: {bkinds}")
+    if bkinds != ["CYLINDER", "SPHERE", "SPHERE"]:
+        fail(f"capsule should be cylinder + 2 spheres, got {bkinds}")
+    scoll = bpy.data.collections.get(SOLID_COLLECTION)
+    if scoll is None or len(scoll.objects) != 3:
+        fail(f"'{SOLID_COLLECTION}' should hold 3 solids")
+    out_solid = os.path.join(os.path.dirname(__file__), "smoke_solid.step")
+    if bpy.ops.reverse.export_step(filepath=out_solid, unit="MM",
+                                   group_filter="BOOL") != {"FINISHED"}:
+        fail("BOOL-only STEP export failed")
+    if not os.path.exists(out_solid) or os.path.getsize(out_solid) < 500:
+        fail("BOOL STEP file missing or too small")
+    if bpy.ops.reverse.clear_solid_set() != {"FINISHED"}:
+        fail("clear_solid_set failed")
+    if any(f.group == "BOOL" for f in bpy.context.scene.reverse.features):
+        fail("clear_solid_set left BOOL features behind")
+    print("[ok] solid set exported (BOOL filter) and cleared")
+
     # Overlay manager (INFRA-B): enable/disable must be leak-free — exactly one
     # draw handler while active, none after clearing.
     from reverse_mesh import overlay
