@@ -15,8 +15,11 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from fitting import FitResult, Region  # noqa: E402
 from fitting.decompose import (  # noqa: E402
     MeshGraph,
+    _accept,
+    _is_degenerate,
     grow_regions,
     optimize_decomposition,
 )
@@ -194,6 +197,24 @@ def test_plain_cube_min_faces_one():
     out = optimize_decomposition(g, tolerance=0.02, min_faces=1)
     kinds = sorted(r.kind for r in out.results)
     assert kinds == ["PLANE"] * 6, f"plain cube should give 6 planes, got {kinds}"
+
+
+def test_degenerate_oversized_sphere_rejected():
+    # A near-flat patch fits a sphere of enormous radius with low RMS; that
+    # degenerate fit must be rejected (it caused "oversized spheres at the mesh
+    # faces" on capsules), while a real sphere of sane radius is kept.
+    scale = 2.0
+    giant = FitResult(kind="SPHERE", rms=0.0, max_error=0.0,
+                      params={"center": (0, 0, 0), "radius": 500.0, "_scale": scale})
+    real = FitResult(kind="SPHERE", rms=0.0, max_error=0.0,
+                     params={"center": (0, 0, 0), "radius": 1.0, "_scale": scale})
+    assert _is_degenerate(giant) is True
+    assert _is_degenerate(real) is False
+    # _accept rejects the giant on the degeneracy test alone — it short-circuits
+    # before the alignment check, so the region's contents don't matter here.
+    pts = np.array([[0, 0, 0.], [1, 0, 0.], [0, 1, 0.]])
+    region = Region.from_points(pts, np.tile([0, 0, 1.], (3, 1)))
+    assert _accept(giant, region, 0.02, 0.9) is False
 
 
 def test_cylinder_wall_single_primitive():
