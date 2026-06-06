@@ -239,8 +239,12 @@ class ReverseSettings(PropertyGroup):
     )
     decompose_min_faces: IntProperty(
         name="Min faces / region",
-        description="Skip regions smaller than this many faces (noise guard)",
-        default=4, min=1, max=100000,
+        description=(
+            "Skip regions smaller than this many faces. 1 fits even coarse meshes "
+            "(a plain cube → 6 planes); raise it to ignore small noisy patches on "
+            "dense scans"
+        ),
+        default=1, min=1, max=100000,
     )
     decompose_min_coverage: FloatProperty(
         name="Min coverage",

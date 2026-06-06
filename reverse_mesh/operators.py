@@ -756,6 +756,20 @@ class REVERSE_OT_auto_decompose(Operator):
         obj = context.active_object
         return obj is not None and obj.type == "MESH"
 
+    @staticmethod
+    def _empty_message(context, out):
+        """Actionable reason no primitives came back, for the user report."""
+        obj = context.active_object
+        if obj is None or not len(obj.data.polygons):
+            return "Auto-decompose: the active mesh has no faces"
+        if out.n_candidates == 0:
+            return ("Auto-decompose found no primitives — no region fit a surface "
+                    "within tolerance. Raise 'Decompose tolerance', lower 'Min "
+                    "faces / region', or the part may be too freeform")
+        return ("Auto-decompose found no primitives — candidates were rejected by "
+                "the optimizer. Try a higher 'Decompose tolerance' or lower 'Merge "
+                "pressure (λ)'")
+
     def _compute(self, context):
         """Heavy synchronous phase: extract the mesh graph and optimize."""
         s = context.scene.reverse
@@ -799,7 +813,7 @@ class REVERSE_OT_auto_decompose(Operator):
             context.window.cursor_set("DEFAULT")
         if not out.results:
             wm.progress_end()
-            self.report({"WARNING"}, "Auto-decompose found no analytic primitives")
+            self.report({"WARNING"}, self._empty_message(context, out))
             return {"CANCELLED"}
         self._results = out.results
         self._i = 0
@@ -854,7 +868,7 @@ class REVERSE_OT_auto_decompose(Operator):
         finally:
             wm.progress_end()
         if not out.results:
-            self.report({"WARNING"}, "Auto-decompose found no analytic primitives")
+            self.report({"WARNING"}, self._empty_message(context, out))
             return {"CANCELLED"}
         self._coll = _ensure_auto_collection(context)
         self._built = 0
