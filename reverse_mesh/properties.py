@@ -66,6 +66,7 @@ class ReverseFeature(PropertyGroup):
     """One fitted primitive, shown in the session feature list."""
 
     kind: StringProperty(name="Kind")
+    group: StringProperty(name="Group", default="MANUAL")   # "MANUAL" | "AUTO" (whole-mesh decompose)
     summary: StringProperty(name="Summary")
     rms: FloatProperty(name="RMS")
     max_error: FloatProperty(name="Max error")
@@ -220,6 +221,60 @@ class ReverseSettings(PropertyGroup):
         min=0.0,
         max=1.0,
         precision=4,
+    )
+
+    # --- Whole-mesh auto-decompose (heavy, global-optimization path) -----------
+    decompose_angles: StringProperty(
+        name="Crease angles (°)",
+        description=(
+            "Coarse→fine crease angles swept to build competing primitive "
+            "hypotheses. Comma-separated; coarse first (e.g. '40, 25, 12, 6')"
+        ),
+        default="40, 25, 12, 6",
+    )
+    decompose_tolerance: FloatProperty(
+        name="Decompose tolerance",
+        description="Max relative RMS for a region's primitive to be accepted",
+        default=0.02, min=1e-4, max=1.0, precision=4,
+    )
+    decompose_min_faces: IntProperty(
+        name="Min faces / region",
+        description="Skip regions smaller than this many faces (noise guard)",
+        default=4, min=1, max=100000,
+    )
+    decompose_min_coverage: FloatProperty(
+        name="Min coverage",
+        description="Warn if fewer than this fraction of the mesh area gets explained",
+        default=0.4, min=0.0, max=1.0, subtype="FACTOR",
+    )
+    decompose_merge: BoolProperty(
+        name="Merge same-kind",
+        description=(
+            "After the greedy cover, collapse adjacent same-kind primitives "
+            "(coplanar planes, coaxial cylinders) when it lowers the energy"
+        ),
+        default=True,
+    )
+    decompose_lambda: FloatProperty(
+        name="Merge pressure (λ)",
+        description=(
+            "Cost charged per kept primitive. Higher = fewer, larger primitives "
+            "(more aggressive merging); lower = more, tighter-fitting primitives"
+        ),
+        default=0.01, min=0.0, max=10.0, precision=4,
+    )
+    decompose_mu: FloatProperty(
+        name="Coverage pressure (μ)",
+        description=(
+            "Cost charged per unit of unexplained area. Higher = try harder to "
+            "cover everything; lower = leave freeform regions out"
+        ),
+        default=1.0, min=0.0, max=100.0, precision=3,
+    )
+    decompose_nu: FloatProperty(
+        name="Boundary smoothness (ν)",
+        description="Cost charged for a fragmented assignment border",
+        default=0.02, min=0.0, max=10.0, precision=4,
     )
 
     features: CollectionProperty(type=ReverseFeature)

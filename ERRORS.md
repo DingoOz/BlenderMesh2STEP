@@ -89,3 +89,13 @@
 - **Root cause:** The trim threshold is computed from a model already biased by the outliers; iterative trimming has no way to escape a bad basin.
 - **Fix applied:** Replaced trimmed-LSQ with RANSAC consensus: fit many small random samples, keep the model with the most inliers, then refit once on that consensus set. Added a short-circuit returning the plain fit when it is already clean (rel_rms < 1e-3) so machine-precision fits are never disturbed.
 - **Prevention rule:** For outlier rejection, find the model by minimal/small-sample consensus (RANSAC), not by trimming a global fit. Only trim/reweight once you already have an outlier-free model estimate.
+
+### normal_alignment() raises for FILLET — predicted_normals has no FILLET branch — 2026-06-06
+
+- **Severity:** Medium
+- **Category:** API Misuse
+- **File(s):** `reverse_mesh/fitting/primitives.py`, `reverse_mesh/fitting/decompose.py`
+- **Pattern:** Calling `normal_alignment(result, region)` (or `predicted_normals(result, pts)`) on an arbitrary `FitResult` without checking its `kind`. `predicted_normals` implements every primitive *except* FILLET and raises `ValueError(result.kind)` on the fallthrough, so any alignment/normal-agreement check crashes for fillet fits. Easy to miss because FILLET is excluded from the `FITTERS` registry, so most code paths never feed a fillet through these helpers.
+- **Root cause:** FILLET was added as a special-case fit (outside `FITTERS`) and `predicted_normals` was never extended to cover it; the trimmed partial-cylinder shares the cylinder's radial normal but has no branch.
+- **Fix applied:** In `decompose.py` the alignment gate routes FILLET through a local `_fillet_alignment` that computes the radial (cylinder-like) normal directly, and only calls `normal_alignment` for the other kinds.
+- **Prevention rule:** Before calling `predicted_normals`/`normal_alignment` on a `FitResult` of unknown kind, guard for FILLET (and any future non-`FITTERS` kind). Better long-term: add a FILLET branch to `predicted_normals` (radial normal, same as CYLINDER) so the helpers are total over all kinds.

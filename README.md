@@ -156,11 +156,13 @@ design rationale and the tiered roadmap, and
 
 ## Roadmap
 
-**Recently landed:** edge-fillet recovery with trimmed-surface export · pattern
-propagation (fit one hole, find the rest) · auto-stitch into shared topology ·
-counterbore/countersink presets · fit-quality heatmap · RANSAC outlier rejection ·
-non-destructive feature stack · dimension snapping · validation report · thread
-tagging · PMI sidecar + semantic AP242 dimensions.
+**Recently landed:** whole-mesh auto-decompose (one button: globally optimizes the
+whole part into a separate set of primitives) · edge-fillet recovery with
+trimmed-surface export · pattern propagation (fit one hole, find the rest) ·
+auto-stitch into shared topology · counterbore/countersink presets · fit-quality
+heatmap · RANSAC outlier rejection · non-destructive feature stack · dimension
+snapping · validation report · thread tagging · PMI sidecar + semantic AP242
+dimensions.
 
 **Next:**
 

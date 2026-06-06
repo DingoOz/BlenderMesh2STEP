@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Primitive-fitting core. Pure NumPy, no Blender dependency."""
 
-from .common import FitResult, Region
+from .common import FitResult, Region, region_scale
+from .decompose import MeshGraph, optimize_decomposition
 from .patterns import classify_arrangement, match_cylinders
 from .primitives import (
     FITTERS,
@@ -14,6 +15,7 @@ from .primitives import (
     fit_robust,
     fit_sphere,
     fit_torus,
+    normal_alignment,
     predicted_normals,
     signed_distances,
     snap_result,
@@ -33,10 +35,14 @@ __all__ = [
     "fit_torus",
     "fit_fillet",
     "fit_robust",
+    "normal_alignment",
     "predicted_normals",
     "signed_distances",
     "snap_result",
     "summarize",
+    "region_scale",
     "match_cylinders",
     "classify_arrangement",
+    "MeshGraph",
+    "optimize_decomposition",
 ]

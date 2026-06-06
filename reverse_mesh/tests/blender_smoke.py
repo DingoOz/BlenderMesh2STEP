@@ -346,6 +346,54 @@ def main():
         fail("STEP file missing AP242 header")
     print(f"[ok] exported STEP for {n_reverse} Reverse objects → {os.path.basename(out)}")
 
+    # Whole-mesh auto-decompose (global-optimization path). A subdivided cube must
+    # come back as 6 planes in a SEPARATE 'Reverse Auto' collection, tagged AUTO,
+    # exportable on its own. (Called as execute() — modal doesn't pump headless.)
+    from reverse_mesh.operators import AUTO_COLLECTION
+    bpy.ops.object.mode_set(mode="OBJECT")
+    bpy.ops.mesh.primitive_cube_add(size=2.0, location=(0.0, 60.0, 0.0))
+    dcube = bpy.context.active_object
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="SELECT")
+    bpy.ops.mesh.subdivide(number_cuts=3)          # 16 quads per side
+    bpy.ops.object.mode_set(mode="OBJECT")
+    bpy.context.view_layer.objects.active = dcube
+    settings.decompose_tolerance = 0.02
+    settings.decompose_min_faces = 4
+    if bpy.ops.reverse.auto_decompose() != {"FINISHED"}:
+        fail("auto_decompose failed")
+    coll = bpy.data.collections.get(AUTO_COLLECTION)
+    if coll is None or len(coll.objects) < 6:
+        fail(f"auto-decompose collection missing/short: {coll and len(coll.objects)}")
+    auto_objs = list(coll.objects)
+    if any(o["reverse"]["group"] != "AUTO" for o in auto_objs):
+        fail("an auto object is missing its AUTO group tag")
+    auto_feats = [f for f in bpy.context.scene.reverse.features if f.group == "AUTO"]
+    kinds = sorted(f.kind for f in auto_feats)
+    print(f"[ok] auto-decompose → {len(auto_feats)} AUTO features in "
+          f"'{AUTO_COLLECTION}': {kinds}")
+    if kinds != ["PLANE"] * 6:
+        fail(f"expected 6 planes from a cube, got {kinds}")
+
+    # Export just the AUTO set.
+    out_auto = os.path.join(os.path.dirname(__file__), "smoke_auto.step")
+    if bpy.ops.reverse.export_step(filepath=out_auto, unit="MM",
+                                   group_filter="AUTO") != {"FINISHED"}:
+        fail("AUTO-only STEP export failed")
+    if not os.path.exists(out_auto) or os.path.getsize(out_auto) < 500:
+        fail("AUTO STEP file missing or too small")
+    print("[ok] exported AUTO-only STEP")
+
+    # Clear Auto Set removes the collection's objects and the AUTO features.
+    if bpy.ops.reverse.clear_auto_set() != {"FINISHED"}:
+        fail("clear_auto_set failed")
+    coll = bpy.data.collections.get(AUTO_COLLECTION)
+    if coll is not None and len(coll.objects) != 0:
+        fail("clear_auto_set left objects behind")
+    if any(f.group == "AUTO" for f in bpy.context.scene.reverse.features):
+        fail("clear_auto_set left AUTO features behind")
+    print("[ok] clear auto set removed objects + features")
+
     # Overlay manager (INFRA-B): enable/disable must be leak-free — exactly one
     # draw handler while active, none after clearing.
     from reverse_mesh import overlay

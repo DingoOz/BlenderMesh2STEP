@@ -34,5 +34,9 @@ jobs:
         working-directory: reverse_mesh
         run: python tests/test_step.py
 
+      - name: Whole-mesh decompose tests
+        working-directory: reverse_mesh
+        run: python tests/test_decompose.py
+
       - name: Byte-compile all modules
         run: python -m compileall reverse_mesh
