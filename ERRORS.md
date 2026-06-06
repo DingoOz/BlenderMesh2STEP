@@ -109,3 +109,13 @@
 - **Root cause:** The quad's in-plane axes were not aligned to the data, and its extent was the symmetric max-abs about the centroid, so a thin diagonal patch got a large square-ish bounding box.
 - **Fix applied:** Align the in-plane axes to the region's principal directions (SVD of the points projected into the plane), size the quad to the actual per-axis min/max, and centre it on that bounding rectangle (a shift that stays within the fitted plane, so residuals/normal are unchanged).
 - **Prevention rule:** When turning a fitted region into a bounded patch, derive the patch frame from the data (PCA/principal axes), not from a fixed world seed, and size it to the real min/max extent. Treat any centroid-centred, axis-arbitrary bounding box over a non-square region as an overshoot bug.
+
+### Degenerate huge-radius sphere/cylinder beats the plane on gently-curved patches — 2026-06-06
+
+- **Severity:** High
+- **Category:** Logic
+- **File(s):** `reverse_mesh/fitting/decompose.py`
+- **Pattern:** Accepting a least-squares curved-primitive fit (sphere/cylinder/cone/torus) by RMS/tolerance alone, with no bound on its radius relative to the region. A near-flat patch fits a sphere (or cylinder) of enormous radius with very low RMS — and that degenerate fit beats the correct plane on raw RMS — so whole-mesh decompose covered a capsule's gently-curved wall in dozens of oversized spheres centred far from the part ("many oversized spheres at the mesh faces").
+- **Root cause:** A flat surface is the limit of a sphere as radius→∞; the algebraic fit happily returns that giant sphere, and nothing distinguished it from a real one. fit_auto's Occam tie-break only prefers the plane when it is "essentially exact" (rel_rms < 1e-3); for a moderately curved patch the plane is not exact, so the lower-RMS giant sphere won.
+- **Fix applied:** Reject a curved primitive whose characteristic radius exceeds `DEGENERATE_RADIUS_RATIO` (20) × the region's own scale, and fall back to fitting a plane for that patch. Genuine spheres/cylinders (radius on the order of the region) and large features captured by a coarse-scale candidate still pass.
+- **Prevention rule:** When fitting an unbounded-radius primitive, gate on a physical-plausibility bound (radius not vastly larger than the data it was fit to), not on residual alone. Treat "radius ≫ region size" as a flat patch and represent it as a plane.

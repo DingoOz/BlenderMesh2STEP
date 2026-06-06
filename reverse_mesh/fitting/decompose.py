@@ -40,10 +40,20 @@ from .primitives import (
     FITTERS,
     fit_auto,
     fit_fillet,
+    fit_plane,
     normal_alignment,
     signed_distances,
     snap_result,
 )
+
+
+# A curved primitive whose radius exceeds this many times its region's own size is
+# degenerate: a near-flat patch fits a sphere/cylinder of enormous radius with low
+# RMS and so beats the (correct) plane — producing "oversized spheres at the mesh
+# faces". Such a patch is represented as a plane instead. The bound is generous so
+# genuine shallow domes / large-radius walls still pass (their ratio stays well
+# under it once a coarse-scale candidate covers the whole feature).
+DEGENERATE_RADIUS_RATIO = 20.0
 
 
 # Default energy weights. Areas are normalized to fractions of the total surface,
@@ -181,12 +191,30 @@ def _alignment(result: FitResult, region: Region) -> float:
     return normal_alignment(result, region)
 
 
+def _is_degenerate(result) -> bool:
+    """True for a curved primitive whose radius dwarfs its region — a flat patch
+    masquerading as a giant sphere/cylinder/cone/torus (see DEGENERATE_RADIUS_RATIO)."""
+    p = result.params
+    scale = p.get("_scale", 1.0) or 1.0
+    if result.kind in ("SPHERE", "CYLINDER", "FILLET"):
+        r = p["radius"]
+    elif result.kind == "CONE":
+        r = max(p["radius1"], p["radius2"])
+    elif result.kind == "TORUS":
+        r = p["major_radius"]
+    else:
+        return False
+    return r > DEGENERATE_RADIUS_RATIO * scale
+
+
 def _accept(result, region, tolerance, alignment_gate) -> bool:
-    """Quality gate: a primitive must fit its region within tolerance and agree
-    with its face normals — the same two tests the manual AUTO path uses."""
+    """Quality gate: a primitive must fit its region within tolerance, agree with
+    its face normals, and not be a degenerate oversized curve."""
     if result is None:
         return False
     if result.rel_rms > tolerance:
+        return False
+    if _is_degenerate(result):
         return False
     return _alignment(result, region) >= alignment_gate
 
@@ -208,6 +236,15 @@ def _fit_region_variants(region, tolerance, alignment_gate, snap):
         if snap is not None:
             snap_result(auto, step=snap)
         out.append(auto)
+    elif not auto_ok and not fil_ok:
+        # fit_auto's pick was rejected (a degenerate giant sphere/cylinder over a
+        # gently-curved patch, or just over tolerance). Fall back to a plane so the
+        # patch is covered by a flat quad instead of an oversized curved surface.
+        pl = fit_plane(region)
+        if _accept(pl, region, tolerance, alignment_gate):
+            if snap is not None:
+                snap_result(pl, step=snap)
+            out.append(pl)
     if fil_ok:
         if snap is not None:
             snap_result(fil, step=snap)
