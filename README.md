@@ -156,8 +156,11 @@ design rationale and the tiered roadmap, and
 
 ## Roadmap
 
-**Recently landed:** whole-mesh auto-decompose (one button: globally optimizes the
-whole part into a separate set of primitives) · edge-fillet recovery with
+**Recently landed:** whole-mesh **solid decompose** (fills the volume with a union
+of inscribed solids — a capsule → cylinder + 2 spheres, tessellation-independent,
+nothing juts outside; export via OCCT boolean union) · whole-mesh surface
+auto-decompose (one button: globally optimizes the whole part into a separate set
+of primitives) · edge-fillet recovery with
 trimmed-surface export · pattern propagation (fit one hole, find the rest) ·
 auto-stitch into shared topology · counterbore/countersink presets · fit-quality
 heatmap · RANSAC outlier rejection · non-destructive feature stack · dimension

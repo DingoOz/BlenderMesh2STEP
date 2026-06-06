@@ -22,7 +22,9 @@ class REVERSE_UL_features(UIList):
         row.label(text="", icon=op_icon)
         label = item.summary or item.kind
         if item.group == "AUTO":
-            label = f"[A] {label}"           # whole-mesh auto-decompose set
+            label = f"[A] {label}"           # whole-mesh surface auto-decompose set
+        elif item.group == "BOOL":
+            label = f"[S] {label}"           # whole-mesh solid/boolean set
         row.label(text=label, icon=icon_for.get(item.kind, "DOT"))
         row.label(text=f"RMS {item.rms:.3g}")
 
@@ -105,6 +107,21 @@ class REVERSE_PT_main(Panel):
         adv.prop(settings, "decompose_mu")
         adv.prop(settings, "decompose_nu")
 
+        # --- Whole-mesh SOLID / boolean decompose (volumetric, additive CSG) ---
+        box = layout.box()
+        box.alert = True
+        col = box.column(align=True)
+        col.label(text="Solid Decompose (Boolean)", icon="MOD_BOOLEAN")
+        col.label(text="Heavy: fills the VOLUME with solids", icon="ERROR")
+        col.operator("reverse.solid_decompose", icon="META_BALL",
+                     text="Auto-Decompose Solid (Boolean)")
+        col.operator("reverse.clear_solid_set", icon="TRASH", text="Clear Solid Set")
+        sub = box.column(align=True)
+        sub.prop(settings, "solid_resolution")
+        sub.prop(settings, "solid_max_primitives")
+        sub.prop(settings, "solid_min_coverage")
+        box.label(text="Tip: export with OCCT 'Merge into one solid'", icon="INFO")
+
 
 class REVERSE_PT_features(Panel):
     bl_label = "Fitted Features"
@@ -177,8 +194,8 @@ class REVERSE_PT_features(Panel):
 
         box = layout.box()
         box.label(text="Export", icon="EXPORT")
-        # Show the manual/auto split only once an auto set exists.
-        if any(f.group == "AUTO" for f in settings.features):
+        # Show the set-filter hint once a machine-generated set exists.
+        if any(f.group in {"AUTO", "BOOL"} for f in settings.features):
             box.label(text="Tip: pick the feature set in the export dialog", icon="FILTER")
         box.operator("reverse.export_step", text="Export STEP (AP242)", icon="FILE_CACHE")
 
