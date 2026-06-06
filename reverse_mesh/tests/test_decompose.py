@@ -186,6 +186,16 @@ def test_cube_to_six_planes():
     assert out.coverage > 0.99, f"coverage {out.coverage:.3f}"
 
 
+def test_plain_cube_min_faces_one():
+    # Regression: a plain cube (one quad per side) must decompose with the default
+    # min_faces=1 — earlier the default of 4 dropped every side and returned nothing.
+    g = _cube(res=1)
+    assert g.n_faces == 6
+    out = optimize_decomposition(g, tolerance=0.02, min_faces=1)
+    kinds = sorted(r.kind for r in out.results)
+    assert kinds == ["PLANE"] * 6, f"plain cube should give 6 planes, got {kinds}"
+
+
 def test_cylinder_wall_single_primitive():
     g = _cylinder_wall()
     out = optimize_decomposition(g, tolerance=0.02, min_faces=3)
