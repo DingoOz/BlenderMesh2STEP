@@ -95,14 +95,38 @@ def fit_plane(region: Region) -> FitResult | None:
     signed = (points - centroid) @ normal
     rms, max_err = residual_stats(signed)
 
-    # In-plane extent, so the generated quad matches the selected region.
+    # In-plane extent, so the generated quad matches the selected region. Align the
+    # axes to the region's principal in-plane directions (not arbitrary world-seeded
+    # ones), then size the quad to the actual min/max along each axis. An
+    # axis-arbitrary bounding box over an elongated or diagonal patch is far larger
+    # than the region — its empty corners jut out past the true surface.
     e1, e2 = orthonormal_basis(normal)
     rel = points - centroid
-    half_u = float(np.max(np.abs(rel @ e1))) if len(rel) else 1.0
-    half_v = float(np.max(np.abs(rel @ e2))) if len(rel) else 1.0
+    inplane = rel - np.outer(rel @ normal, normal)
+    if len(points) >= 3:
+        try:
+            _, _, vh = np.linalg.svd(inplane, full_matrices=False)
+            a1 = vh[0] - (vh[0] @ normal) * normal
+            if np.linalg.norm(a1) > 1e-9:
+                e1 = a1 / np.linalg.norm(a1)
+                e2 = np.cross(normal, e1)
+        except np.linalg.LinAlgError:
+            pass
+    u = rel @ e1
+    v = rel @ e2
+    if len(rel):
+        umin, umax = float(u.min()), float(u.max())
+        vmin, vmax = float(v.min()), float(v.max())
+    else:
+        umin = umax = vmin = vmax = 0.0
+    half_u = max((umax - umin) / 2.0, 1e-9)
+    half_v = max((vmax - vmin) / 2.0, 1e-9)
+    # Centre the quad on the region's bounding rectangle, not the centroid (which a
+    # one-sided patch can sit off-centre of). Stays in the fitted plane.
+    point = centroid + e1 * ((umin + umax) / 2.0) + e2 * ((vmin + vmax) / 2.0)
 
     params = {
-        "point": centroid,
+        "point": point,
         "normal": normal,
         "e1": e1,
         "e2": e2,

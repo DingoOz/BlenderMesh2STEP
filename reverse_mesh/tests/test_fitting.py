@@ -140,6 +140,21 @@ def main():
     results.append(_check("plane", r.rms < 1e-9 and abs(abs(r.params['normal'][2]) - 1) < 1e-6,
                           f"rms={r.rms:.2e}"))
 
+    # Plane patch must be a TIGHT oriented rectangle (PCA-aligned), not an oversized
+    # axis-aligned box whose empty corners jut outside the region. Elongated patch
+    # rotated 35° in-plane: true half-extents are ~4.0 × ~0.6.
+    _rng = np.random.default_rng(5)
+    _u = _rng.uniform(-4, 4, 800)
+    _v = _rng.uniform(-0.6, 0.6, 800)
+    _a = math.radians(35)
+    _x = _u * math.cos(_a) - _v * math.sin(_a)
+    _y = _u * math.sin(_a) + _v * math.cos(_a)
+    _pts = np.column_stack([_x, _y, np.zeros(800)])
+    rp = fit_plane(_region(_pts, np.tile([0.0, 0.0, 1.0], (800, 1))))
+    hu, hv = sorted([rp.params["half_u"], rp.params["half_v"]])
+    results.append(_check("plane oriented extent", hu < 0.8 and 3.6 < hv < 4.2,
+                          f"half-extents {hv:.2f} x {hu:.2f} (want ~4.0 x ~0.6)"))
+
     pts, nrm = _sample_sphere()
     r = fit_sphere(_region(pts, nrm))
     results.append(_check("sphere", r.rms < 1e-6 and abs(r.params['radius'] - 3.0) < 1e-4,
