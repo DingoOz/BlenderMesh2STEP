@@ -18,8 +18,9 @@ from mathutils import Matrix, Vector
 
 from . import build, occ_export, overlay, pmi_export, step_export
 from .fitting import (
-    FITTERS, Region, classify_arrangement, fit_auto, fit_fillet, fit_robust,
-    match_cylinders, signed_distances, snap_result, summarize,
+    FITTERS, MeshGraph, Region, classify_arrangement, fit_auto, fit_fillet,
+    fit_robust, match_cylinders, optimize_decomposition, signed_distances,
+    snap_result, summarize,
 )
 from .fitting.common import deviation_color
 
@@ -130,6 +131,105 @@ def _segment_faces(faces, angle_threshold_rad):
             continue
         regions.append(_grow_region(seed, selected, angle_threshold_rad, visited))
     return regions
+
+
+AUTO_COLLECTION = "Reverse Auto"
+
+
+def _snap_step(settings):
+    """Resolve the active snap grid from the settings (preset or custom)."""
+    return (settings.snap_step if settings.snap_preset == "CUSTOM"
+            else float(settings.snap_preset))
+
+
+def _parse_angles(text):
+    """Parse the comma/semicolon-separated crease-angle sweep string."""
+    angles = []
+    for tok in str(text).replace(";", ",").split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            a = float(tok)
+        except ValueError:
+            continue
+        if 0.0 < a <= 180.0:
+            angles.append(a)
+    return tuple(angles) if angles else (40.0, 25.0, 12.0, 6.0)
+
+
+def _mesh_graph(obj):
+    """Snapshot ``obj``'s mesh into a pure :class:`MeshGraph` (world space).
+
+    Mirrors :func:`_region_from_faces`' transforms (``mw`` for points, the
+    inverse-transpose for normals) but for the whole mesh, and frees the bmesh so
+    nothing downstream holds a live reference (it must survive across modal ticks).
+    """
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.verts.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
+    bm.verts.index_update()
+    bm.faces.index_update()
+
+    mw = obj.matrix_world
+    nmat = mw.to_3x3().inverted_safe().transposed()
+
+    verts = np.array([tuple(mw @ v.co) for v in bm.verts], dtype=float)
+    face_vert_idx = [np.array([v.index for v in f.verts], dtype=int) for f in bm.faces]
+    centroids = np.array([tuple(mw @ f.calc_center_median()) for f in bm.faces], dtype=float)
+    normals = np.array(
+        [tuple((nmat @ f.normal).normalized()) for f in bm.faces], dtype=float)
+    areas = np.array([f.calc_area() for f in bm.faces], dtype=float)
+    adjacency = []
+    for f in bm.faces:
+        nbrs = set()
+        for e in f.edges:
+            for nf in e.link_faces:
+                if nf is not f:
+                    nbrs.add(nf.index)
+        adjacency.append(sorted(nbrs))
+
+    graph = MeshGraph(verts=verts, face_vert_idx=face_vert_idx, centroids=centroids,
+                      normals=normals, areas=areas, adjacency=adjacency)
+    bm.free()
+    return graph
+
+
+def _ensure_auto_collection(context):
+    """Return (creating if needed) the dedicated 'Reverse Auto' collection."""
+    coll = bpy.data.collections.get(AUTO_COLLECTION)
+    if coll is None:
+        coll = bpy.data.collections.new(AUTO_COLLECTION)
+    if coll.name not in context.scene.collection.children:
+        try:
+            context.scene.collection.children.link(coll)
+        except RuntimeError:
+            pass
+    return coll
+
+
+def _move_to_collection(obj, coll):
+    """Unlink ``obj`` from wherever build_object placed it and link it to ``coll``."""
+    for c in list(obj.users_collection):
+        c.objects.unlink(obj)
+    coll.objects.link(obj)
+
+
+def _add_auto_feature(context, settings, result, obj):
+    """Append a feature for an auto-decomposed primitive, tagged group='AUTO'."""
+    item = settings.features.add()
+    item.kind = result.kind
+    item.group = "AUTO"
+    item.summary = result.summary
+    item.rms = result.rms
+    item.max_error = result.max_error
+    item.object_name = obj.name
+    item.operation = "ADD"
+    item.cut_mode = "THROUGH"
+    item.source_object = obj.name
+    settings.active_feature = len(settings.features) - 1
+    return item
 
 
 class REVERSE_OT_fit_selection(Operator):
@@ -631,6 +731,170 @@ class REVERSE_OT_select_feature_object(Operator):
         return {"FINISHED"}
 
 
+class REVERSE_OT_auto_decompose(Operator):
+    """Whole-mesh auto-decomposition (HEAVY / EXPERIMENTAL)
+
+    Point at a mesh and press once — no manual face selection. Segments the ENTIRE
+    active mesh at several scales, fits the best analytic primitive to every smooth
+    region, then globally optimizes which *set* of primitives best explains the
+    part (fewest primitives, lowest residual, most coverage). The result is built as
+    a SEPARATE set of clean primitives in the 'Reverse Auto' collection, ready for
+    STEP export. Press Esc to cancel mid-build.
+
+    Heavy: it tries a whole pool of competing hypotheses. Very noisy scan meshes are
+    better remeshed/cleaned first — this expects reasonably clean geometry.
+    """
+
+    bl_idname = "reverse.auto_decompose"
+    bl_label = "Auto-Decompose Whole Mesh"
+    bl_options = {"REGISTER", "UNDO"}
+
+    _timer = None
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and obj.type == "MESH"
+
+    def _compute(self, context):
+        """Heavy synchronous phase: extract the mesh graph and optimize."""
+        s = context.scene.reverse
+        obj = context.active_object
+        if obj.mode == "EDIT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+        graph = _mesh_graph(obj)
+        wm = context.window_manager
+        out = optimize_decomposition(
+            graph,
+            angles=_parse_angles(s.decompose_angles),
+            lam=s.decompose_lambda, mu=s.decompose_mu, nu=s.decompose_nu,
+            tolerance=s.decompose_tolerance,
+            alignment_gate=0.9,
+            min_faces=s.decompose_min_faces,
+            snap=(_snap_step(s) if s.snap_enabled else None),
+            merge=s.decompose_merge,
+            progress=lambda frac: wm.progress_update(int(100 * frac)),
+        )
+        self._out = out
+        return out
+
+    def _build_one(self, context, result):
+        s = context.scene.reverse
+        obj = build.build_object(context, result, s.segments,
+                                 operation="ADD", cut_mode="THROUGH")
+        _move_to_collection(obj, self._coll)
+        try:
+            obj["reverse"]["group"] = "AUTO"
+        except (KeyError, TypeError):
+            pass
+        _add_auto_feature(context, s, result, obj)
+
+    def invoke(self, context, event):
+        wm = context.window_manager
+        context.window.cursor_set("WAIT")
+        wm.progress_begin(0, 100)
+        try:
+            out = self._compute(context)
+        finally:
+            context.window.cursor_set("DEFAULT")
+        if not out.results:
+            wm.progress_end()
+            self.report({"WARNING"}, "Auto-decompose found no analytic primitives")
+            return {"CANCELLED"}
+        self._results = out.results
+        self._i = 0
+        self._built = 0
+        self._coll = _ensure_auto_collection(context)
+        self._timer = wm.event_timer_add(0.01, window=context.window)
+        wm.modal_handler_add(self)
+        return {"RUNNING_MODAL"}
+
+    def modal(self, context, event):
+        if event.type == "ESC":
+            return self._finish(context, cancelled=True)
+        if event.type != "TIMER":
+            return {"PASS_THROUGH"}
+        wm = context.window_manager
+        end = min(self._i + 8, len(self._results))          # build 8 objects per tick
+        for r in self._results[self._i:end]:
+            self._build_one(context, r)
+            self._built += 1
+        self._i = end
+        wm.progress_update(int(100 * self._i / max(len(self._results), 1)))
+        if context.area:
+            context.area.tag_redraw()
+        if self._i >= len(self._results):
+            return self._finish(context, cancelled=False)
+        return {"RUNNING_MODAL"}
+
+    def _finish(self, context, *, cancelled):
+        wm = context.window_manager
+        if self._timer is not None:
+            wm.event_timer_remove(self._timer)
+            self._timer = None
+        wm.progress_end()
+        if cancelled:
+            self.report({"WARNING"}, f"Cancelled — built {self._built} primitives")
+            return {"CANCELLED"}
+        out = getattr(self, "_out", None)
+        cov = out.coverage if out else 0.0
+        leftover = len(out.leftover_faces) if out else 0
+        level = ({"WARNING"} if cov < context.scene.reverse.decompose_min_coverage
+                 else {"INFO"})
+        self.report(level, f"Auto-decomposed into {self._built} primitives · "
+                           f"{cov * 100:.0f}% area covered ({leftover} faces left over)")
+        return {"FINISHED"}
+
+    def execute(self, context):
+        """Synchronous fallback — modal handlers don't pump under ``--background``."""
+        wm = context.window_manager
+        wm.progress_begin(0, 100)
+        try:
+            out = self._compute(context)
+        finally:
+            wm.progress_end()
+        if not out.results:
+            self.report({"WARNING"}, "Auto-decompose found no analytic primitives")
+            return {"CANCELLED"}
+        self._coll = _ensure_auto_collection(context)
+        self._built = 0
+        for r in out.results:
+            self._build_one(context, r)
+            self._built += 1
+        self.report({"INFO"}, f"Auto-decomposed into {self._built} primitives · "
+                              f"{out.coverage * 100:.0f}% covered")
+        return {"FINISHED"}
+
+
+class REVERSE_OT_clear_auto_set(Operator):
+    """Delete the auto-decomposed primitives (the 'Reverse Auto' collection)"""
+
+    bl_idname = "reverse.clear_auto_set"
+    bl_label = "Clear Auto Set"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        coll = bpy.data.collections.get(AUTO_COLLECTION)
+        return coll is not None and len(coll.objects) > 0
+
+    def execute(self, context):
+        coll = bpy.data.collections.get(AUTO_COLLECTION)
+        s = context.scene.reverse
+        removed = {o.name for o in list(coll.objects)} if coll else set()
+        if coll:
+            for o in list(coll.objects):
+                bpy.data.objects.remove(o, do_unlink=True)
+        # Drop the matching AUTO features.
+        for i in range(len(s.features) - 1, -1, -1):
+            f = s.features[i]
+            if f.group == "AUTO" or f.object_name in removed:
+                s.features.remove(i)
+        s.active_feature = min(s.active_feature, max(0, len(s.features) - 1))
+        self.report({"INFO"}, f"Cleared {len(removed)} auto primitives")
+        return {"FINISHED"}
+
+
 # String/bool metadata params that round-trip verbatim from obj["reverse"] into
 # the export feature dict (set by features that tag geometry — fillet role,
 # thread spec, counterbore preset). Numeric feature params instead extend the
@@ -716,8 +980,9 @@ def _feature_from_object(obj, user_scale):
     color = rgb if any(abs(c - 1.0) > 1e-4 for c in rgb) else None
     op = data["op"] if "op" in data.keys() else "ADD"
     cut = data["cut"] if "cut" in data.keys() else "THROUGH"
+    group = data["group"] if "group" in data.keys() else "MANUAL"
     return {"kind": kind, "name": obj.name, "params": params, "color": color,
-            "op": op, "cut": cut}
+            "op": op, "cut": cut, "group": group}
 
 
 def _format_report(info):
@@ -806,6 +1071,16 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
         description="Export only selected Reverse objects (otherwise all in the scene)",
         default=False,
     )
+    group_filter: EnumProperty(
+        name="Feature set",
+        description="Which set of fitted primitives to export",
+        items=[
+            ("ALL", "All", "Export both manually-fit and auto-decomposed primitives"),
+            ("MANUAL", "Manual only", "Export only the hand-fit feature stack"),
+            ("AUTO", "Auto only", "Export only the whole-mesh auto-decomposed set"),
+        ],
+        default="ALL",
+    )
     write_pmi_sidecar: BoolProperty(
         name="Write PMI sidecar",
         description=(
@@ -833,6 +1108,10 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
         features = []
         for o in sources:
             if o.type == "MESH" and "reverse" in o:
+                if self.group_filter != "ALL":
+                    grp = o["reverse"]["group"] if "group" in o["reverse"].keys() else "MANUAL"
+                    if grp != self.group_filter:
+                        continue
                 feat = _feature_from_object(o, self.scale)
                 if feat is not None:
                     features.append(feat)
@@ -965,6 +1244,7 @@ def _reconcile_scene(scene):
         data = o["reverse"]
         item = s.features.add()
         item.kind = data.get("kind", "")
+        item.group = data.get("group", "MANUAL")
         item.object_name = o.name
         item.operation = data.get("op", "ADD")
         item.cut_mode = data.get("cut", "THROUGH")
@@ -985,6 +1265,8 @@ def _reconcile_features(_dummy):
 
 classes = (
     REVERSE_OT_fit_selection,
+    REVERSE_OT_auto_decompose,
+    REVERSE_OT_clear_auto_set,
     REVERSE_OT_select_similar,
     REVERSE_OT_move_feature,
     REVERSE_OT_remove_feature,

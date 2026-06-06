@@ -20,7 +20,10 @@ class REVERSE_UL_features(UIList):
         row = layout.row(align=True)
         op_icon = "REMOVE" if item.operation == "SUBTRACT" else "ADD"
         row.label(text="", icon=op_icon)
-        row.label(text=item.summary or item.kind, icon=icon_for.get(item.kind, "DOT"))
+        label = item.summary or item.kind
+        if item.group == "AUTO":
+            label = f"[A] {label}"           # whole-mesh auto-decompose set
+        row.label(text=label, icon=icon_for.get(item.kind, "DOT"))
         row.label(text=f"RMS {item.rms:.3g}")
 
 
@@ -79,6 +82,28 @@ class REVERSE_PT_main(Panel):
         snap.prop(settings, "snap_preset", text="Snap to")
         if settings.snap_preset == "CUSTOM":
             snap.prop(settings, "snap_step")
+
+        # --- Whole-mesh auto-decompose (heavy, experimental) -------------------
+        box = layout.box()
+        box.alert = True                     # red tint flags the heavy/experimental path
+        col = box.column(align=True)
+        col.label(text="Whole-Mesh Auto-Decompose", icon="MODIFIER_DATA")
+        col.label(text="Heavy: optimizes over the ENTIRE mesh", icon="ERROR")
+        col.operator("reverse.auto_decompose", icon="SHADERFX",
+                     text="Auto-Decompose Whole Mesh")
+        col.operator("reverse.clear_auto_set", icon="TRASH", text="Clear Auto Set")
+        sub = box.column(align=True)
+        sub.prop(settings, "decompose_angles")
+        sub.prop(settings, "decompose_tolerance")
+        sub.prop(settings, "decompose_min_faces")
+        sub.prop(settings, "decompose_min_coverage")
+        row = box.row(align=True)
+        row.prop(settings, "decompose_merge", toggle=True)
+        adv = box.column(align=True)
+        adv.label(text="Energy weights (advanced):")
+        adv.prop(settings, "decompose_lambda")
+        adv.prop(settings, "decompose_mu")
+        adv.prop(settings, "decompose_nu")
 
 
 class REVERSE_PT_features(Panel):
@@ -152,6 +177,9 @@ class REVERSE_PT_features(Panel):
 
         box = layout.box()
         box.label(text="Export", icon="EXPORT")
+        # Show the manual/auto split only once an auto set exists.
+        if any(f.group == "AUTO" for f in settings.features):
+            box.label(text="Tip: pick the feature set in the export dialog", icon="FILTER")
         box.operator("reverse.export_step", text="Export STEP (AP242)", icon="FILE_CACHE")
 
         from . import occ_export
