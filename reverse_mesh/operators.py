@@ -218,6 +218,44 @@ def _move_to_collection(obj, coll):
     coll.objects.link(obj)
 
 
+def _build_leftover_object(context, src_obj, face_indices, coll):
+    """Copy ``face_indices`` of ``src_obj`` into a 'Reverse_Leftover' mesh object.
+
+    The patch keeps the source's transform; the geometry lives in the object's
+    own mesh (nothing heavy in IDProperties) and is tagged kind='MESH_PATCH' so
+    the STEP export writes it as faceted planar faces.
+    """
+    keep = set(int(i) for i in face_indices)
+    bm = bmesh.new()
+    bm.from_mesh(src_obj.data)
+    bm.faces.ensure_lookup_table()
+    bmesh.ops.delete(bm, geom=[f for f in bm.faces if f.index not in keep],
+                     context="FACES")
+    mesh = bpy.data.meshes.new("Reverse_Leftover")
+    bm.to_mesh(mesh)
+    bm.free()
+    obj = bpy.data.objects.new("Reverse_Leftover", mesh)
+    obj.matrix_world = src_obj.matrix_world.copy()
+    coll.objects.link(obj)
+    obj["reverse"] = {"kind": "MESH_PATCH", "group": "AUTO",
+                      "op": "ADD", "cut": "THROUGH"}
+    return obj
+
+
+def _add_leftover_feature(context, settings, obj, n_faces):
+    """Append a feature-stack entry for a leftover mesh patch."""
+    item = settings.features.add()
+    item.kind = "MESH_PATCH"
+    item.group = "AUTO"
+    item.summary = f"Leftover · {n_faces} faces"
+    item.object_name = obj.name
+    item.operation = "ADD"
+    item.cut_mode = "THROUGH"
+    item.source_object = obj.name
+    settings.active_feature = len(settings.features) - 1
+    return item
+
+
 def _add_built_feature(context, settings, result, obj, group):
     """Append a feature for a machine-built primitive, tagged with ``group``."""
     item = settings.features.add()
@@ -779,6 +817,7 @@ class REVERSE_OT_auto_decompose(Operator):
         if obj.mode == "EDIT":
             bpy.ops.object.mode_set(mode="OBJECT")
         graph = _mesh_graph(obj)
+        self._src = obj
         wm = context.window_manager
         out = optimize_decomposition(
             graph,
@@ -804,6 +843,17 @@ class REVERSE_OT_auto_decompose(Operator):
         except (KeyError, TypeError):
             pass
         _add_built_feature(context, s, result, obj, "AUTO")
+
+    def _build_leftovers(self, context):
+        """Optionally keep the unexplained faces as a MESH_PATCH object."""
+        s = context.scene.reverse
+        out = getattr(self, "_out", None)
+        src = getattr(self, "_src", None)
+        if (not s.decompose_keep_leftovers or out is None or src is None
+                or not out.leftover_faces):
+            return
+        obj = _build_leftover_object(context, src, out.leftover_faces, self._coll)
+        _add_leftover_feature(context, s, obj, len(out.leftover_faces))
 
     def invoke(self, context, event):
         wm = context.window_manager
@@ -855,10 +905,13 @@ class REVERSE_OT_auto_decompose(Operator):
         out = getattr(self, "_out", None)
         cov = out.coverage if out else 0.0
         leftover = len(out.leftover_faces) if out else 0
+        self._build_leftovers(context)
         level = ({"WARNING"} if cov < context.scene.reverse.decompose_min_coverage
                  else {"INFO"})
+        kept = " (kept as Reverse_Leftover)" if (
+            leftover and context.scene.reverse.decompose_keep_leftovers) else ""
         self.report(level, f"Auto-decomposed into {self._built} primitives · "
-                           f"{cov * 100:.0f}% area covered ({leftover} faces left over)")
+                           f"{cov * 100:.0f}% area covered ({leftover} faces left over{kept})")
         return {"FINISHED"}
 
     def execute(self, context):
@@ -877,6 +930,7 @@ class REVERSE_OT_auto_decompose(Operator):
         for r in out.results:
             self._build_one(context, r)
             self._built += 1
+        self._build_leftovers(context)
         self.report({"INFO"}, f"Auto-decomposed into {self._built} primitives · "
                               f"{out.coverage * 100:.0f}% covered")
         return {"FINISHED"}
@@ -1085,6 +1139,30 @@ _PARAM_KINDS = {
 }
 
 
+# Triangle count above which exporting a leftover MESH_PATCH draws a warning.
+_MESH_PATCH_WARN = 10_000
+
+
+def _mesh_patch_feature(obj, user_scale, data):
+    """Export feature for a leftover mesh patch: world-space triangles."""
+    mesh = obj.data
+    mesh.calc_loop_triangles()
+    mw = obj.matrix_world
+    s = user_scale
+    verts = []
+    for v in mesh.vertices:
+        wv = mw @ v.co
+        verts.append((wv.x * s, wv.y * s, wv.z * s))
+    tris = [tuple(t.vertices) for t in mesh.loop_triangles]
+    rgb = tuple(obj.color[:3])
+    color = rgb if any(abs(c - 1.0) > 1e-4 for c in rgb) else None
+    op = data["op"] if "op" in data.keys() else "ADD"
+    group = data["group"] if "group" in data.keys() else "AUTO"
+    return {"kind": "MESH_PATCH", "name": obj.name,
+            "params": {"verts": verts, "tris": tris},
+            "color": color, "op": op, "cut": "THROUGH", "group": group}
+
+
 def _feature_from_object(obj, user_scale):
     """Read an object's stored fit params and return an export feature dict.
 
@@ -1095,6 +1173,10 @@ def _feature_from_object(obj, user_scale):
     if data is None:
         return None
     kind = data["kind"]
+    if kind == "MESH_PATCH":
+        # The geometry is the object's own mesh; matrix_world already honours
+        # any later moves, so the _xform delta machinery is unnecessary.
+        return _mesh_patch_feature(obj, user_scale, data)
     schema = _PARAM_KINDS.get(kind)
     if schema is None:
         return None
@@ -1293,6 +1375,14 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
         ),
         default=False,
     )
+    include_leftovers: BoolProperty(
+        name="Include leftover patches",
+        description=(
+            "Export 'Reverse_Leftover' mesh patches (faces no primitive explained) "
+            "as faceted planar faces so the STEP contains the complete part"
+        ),
+        default=True,
+    )
     py_cutters: EnumProperty(
         name="Cutters (pure Python)",
         description=(
@@ -1357,6 +1447,7 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
 
         layout.prop(self, "use_selection")
         layout.prop(self, "group_filter")
+        layout.prop(self, "include_leftovers")
         layout.prop(self, "write_pmi_sidecar")
         layout.prop(self, "semantic_pmi")
 
@@ -1379,6 +1470,15 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
                 feat = _feature_from_object(o, eff_scale)
                 if feat is not None:
                     features.append(feat)
+
+        if not self.include_leftovers:
+            features = [f for f in features if f["kind"] != "MESH_PATCH"]
+        big = sum(len(f["params"]["tris"]) for f in features
+                  if f["kind"] == "MESH_PATCH")
+        if big > _MESH_PATCH_WARN:
+            self.report({"WARNING"},
+                        f"Leftover patches carry {big} triangles — the STEP will be "
+                        "large; consider remeshing or disabling 'Include leftover patches'")
 
         if not features:
             self.report({"WARNING"}, "No fitted (Reverse) objects found to export")

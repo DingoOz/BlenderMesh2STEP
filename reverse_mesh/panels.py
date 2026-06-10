@@ -101,6 +101,7 @@ class REVERSE_PT_main(Panel):
         sub.prop(settings, "decompose_min_coverage")
         row = box.row(align=True)
         row.prop(settings, "decompose_merge", toggle=True)
+        row.prop(settings, "decompose_keep_leftovers", toggle=True)
         adv = box.column(align=True)
         adv.label(text="Energy weights (advanced):")
         adv.prop(settings, "decompose_lambda")

@@ -419,6 +419,46 @@ def main():
         fail("AUTO STEP file missing or too small")
     print("[ok] exported AUTO-only STEP")
 
+    # Leftover capture: a cube with a heavily-noised top face decomposes into the
+    # clean sides plus a 'Reverse_Leftover' MESH_PATCH that exports as faceted
+    # faces. (Re-runs auto-decompose with keep-leftovers on.)
+    import random as _random
+    bpy.ops.mesh.primitive_cube_add(size=2.0, location=(0.0, 90.0, 0.0))
+    lcube = bpy.context.active_object
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="SELECT")
+    bpy.ops.mesh.subdivide(number_cuts=3)
+    bpy.ops.object.mode_set(mode="OBJECT")
+    rnd = _random.Random(7)
+    for v in lcube.data.vertices:                  # noise only the top's interior
+        if v.co.z > 0.99 and abs(v.co.x) < 0.9 and abs(v.co.y) < 0.9:
+            v.co.z += rnd.uniform(-0.4, 0.4)
+    bpy.context.view_layer.objects.active = lcube
+    settings.decompose_keep_leftovers = True
+    if bpy.ops.reverse.auto_decompose() != {"FINISHED"}:
+        fail("auto_decompose (leftovers) failed")
+    settings.decompose_keep_leftovers = False
+    lo_obj = next((o for o in bpy.data.collections[AUTO_COLLECTION].objects
+                   if o.name.startswith("Reverse_Leftover")), None)
+    if lo_obj is None:
+        fail("no Reverse_Leftover object was created for the noisy faces")
+    if lo_obj["reverse"]["kind"] != "MESH_PATCH" or lo_obj["reverse"]["group"] != "AUTO":
+        fail(f"leftover object tagged wrong: {dict(lo_obj['reverse'])}")
+    if len(lo_obj.data.polygons) == 0:
+        fail("leftover object has no faces")
+    if not any(f.kind == "MESH_PATCH" for f in bpy.context.scene.reverse.features):
+        fail("no MESH_PATCH feature in the stack")
+    out_lo = os.path.join(os.path.dirname(__file__), "smoke_leftover.step")
+    if bpy.ops.reverse.export_step(filepath=out_lo, unit="MM", group_filter="AUTO",
+                                   backend="PUREPYTHON") != {"FINISHED"}:
+        fail("leftover STEP export failed")
+    with open(out_lo) as f:
+        lo_text = f.read()
+    if "SHELL_BASED_SURFACE_MODEL(" not in lo_text or "'leftover'" not in lo_text:
+        fail("exported STEP is missing the faceted leftover patch")
+    print(f"[ok] leftover capture: {len(lo_obj.data.polygons)} faces → "
+          f"'{lo_obj.name}' → faceted faces in STEP")
+
     # Clear Auto Set removes the collection's objects and the AUTO features.
     if bpy.ops.reverse.clear_auto_set() != {"FINISHED"}:
         fail("clear_auto_set failed")

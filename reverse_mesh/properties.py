@@ -280,6 +280,17 @@ class ReverseSettings(PropertyGroup):
         description="Cost charged for a fragmented assignment border",
         default=0.02, min=0.0, max=10.0, precision=4,
     )
+    decompose_keep_leftovers: BoolProperty(
+        name="Keep leftover faces",
+        description=(
+            "Copy the faces no primitive explained into a 'Reverse_Leftover' mesh "
+            "object so the STEP export contains the complete part (the patch is "
+            "written as faceted planar faces, not an analytic surface). Its "
+            "boundary only meets the fitted surfaces within the fit deviation — "
+            "raise the export's sew tolerance if a watertight pass reports gaps"
+        ),
+        default=False,
+    )
 
     # --- Whole-mesh solid/boolean decompose (volumetric, additive CSG) ---------
     solid_resolution: IntProperty(

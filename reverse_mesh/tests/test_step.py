@@ -171,6 +171,28 @@ def main():
           f"COLOUR_RGB('',{se._num(r)},{se._num(g)},{se._num(b)})" in marked)
     check("cutter MARK leaves the body name alone", "'cutter:box'" not in marked)
 
+    # Leftover mesh patch: triangles → faceted planar faces in a surface model;
+    # degenerate triangles are skipped.
+    patch = [{"kind": "MESH_PATCH", "name": "lo", "params": {
+        "verts": [(0, 0, 0), (1, 0, 0), (0, 1, 0), (1, 1, 0), (2, 2, 2)],
+        "tris": [(0, 1, 2), (1, 3, 2), (4, 4, 0)],   # last is degenerate
+    }}]
+    mtext = se.build_step(patch, unit="MM")
+    check("mesh patch face count", mtext.count("ADVANCED_FACE(") == 2,
+          f"got {mtext.count('ADVANCED_FACE(')}")
+    check("mesh patch is a surface model",
+          "SHELL_BASED_SURFACE_MODEL(" in mtext
+          and "MANIFOLD_SOLID_BREP(" not in mtext)
+    mdefs = set(re.findall(r"^#(\d+)=", mtext, re.MULTILINE))
+    mrefs = set(re.findall(r"#(\d+)", mtext.split("DATA;", 1)[1]))
+    check("mesh patch no dangling refs", not (mrefs - mdefs))
+    # An all-degenerate patch must not emit an empty shell (or crash).
+    empty = se.build_step(
+        [{"kind": "MESH_PATCH", "name": "x",
+          "params": {"verts": [(0, 0, 0)], "tris": [(0, 0, 0)]}}], unit="MM")
+    check("all-degenerate patch yields no shell",
+          "SHELL_BASED_SURFACE_MODEL(" not in empty)
+
     # Unit-aware export scale (scene units → STEP units).
     check("units: metric default scene → mm",
           abs(units.effective_scale("MM", system="METRIC", scale_length=1.0) - 1000.0) < 1e-9)

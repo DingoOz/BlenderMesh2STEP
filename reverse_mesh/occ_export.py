@@ -16,7 +16,7 @@ from __future__ import annotations
 import importlib
 import math
 
-from .step_export import _add, _cross, _perp, _scale, _sub, _unit  # geometry helpers
+from .step_export import _add, _cross, _norm, _perp, _scale, _sub, _unit  # geometry helpers
 
 
 def is_available() -> bool:
@@ -108,7 +108,7 @@ def _grow_cutter(kind, p, frac, ends="BOTH"):
     For cylinders, ``"LOW"`` is the −axis end and ``"HIGH"`` the +axis end. For
     cones, ``"LOW"`` is the r1 (base) end and ``"HIGH"`` the r2 end.
     """
-    if frac <= 0 or ends == "NONE":
+    if frac <= 0 or ends == "NONE" or "axis" not in p:
         return p
     grow_low = ends in ("BOTH", "LOW")
     grow_high = ends in ("BOTH", "HIGH")
@@ -475,6 +475,27 @@ def _make_shape(kind, p, gp_Pnt, gp_Dir, gp_Ax3, gp_Pln,
         pln = gp_Pln(gp_Ax3(gp_Pnt(*c), gp_Dir(*n), gp_Dir(*e1)))
         face = MakeFace(pln, -p["half_u"], p["half_u"], -p["half_v"], p["half_v"]).Face()
         return face, False
+    if kind == "MESH_PATCH":
+        # Leftover mesh region: one planar face per triangle, in a compound. The
+        # watertight pass sews these together with the analytic faces.
+        (MakePolygon,) = _imp("BRepBuilderAPI", "BRepBuilderAPI_MakePolygon")
+        (BRep_Builder,) = _imp("BRep", "BRep_Builder")
+        (TopoDS_Compound,) = _imp("TopoDS", "TopoDS_Compound")
+        builder = BRep_Builder()
+        comp = TopoDS_Compound()
+        builder.MakeCompound(comp)
+        verts = [tuple(float(c) for c in v) for v in p["verts"]]
+        n_faces = 0
+        for tri in p["tris"]:
+            a, b, c = (verts[int(i)] for i in tri)
+            if _norm(_cross(_sub(b, a), _sub(c, a))) < 1e-12:
+                continue                          # degenerate sliver
+            poly = MakePolygon(gp_Pnt(*a), gp_Pnt(*b), gp_Pnt(*c), True)
+            builder.Add(comp, MakeFace(poly.Wire()).Face())
+            n_faces += 1
+        if n_faces == 0:
+            return None, False
+        return comp, False
     if kind == "FILLET":
         # Trimmed cylindrical patch: u = arc angle [u_min, u_max], v = axial extent.
         (Geom_CylindricalSurface,) = _imp("Geom", "Geom_CylindricalSurface")

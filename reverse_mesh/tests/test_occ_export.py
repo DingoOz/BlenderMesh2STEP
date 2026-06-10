@@ -325,6 +325,32 @@ def main():
     except OSError:
         pass
 
+    # Leftover MESH_PATCH: replace one side of the box with a 2-triangle faceted
+    # patch — the watertight pass must sew it with the analytic planes into the
+    # same closed solid.
+    patch_side = {"kind": "MESH_PATCH", "op": "ADD", "name": "patch", "params": {
+        "verts": [(1, -1, -1), (1, 1, -1), (1, 1, 1), (1, -1, 1)],
+        "tris": [(0, 1, 2), (0, 2, 3)]}}
+    mixed = [patch_side] + box_planes[1:]
+    out7 = os.path.join(os.path.dirname(__file__), "occ_patch.step")
+    info7 = occ_export.export(mixed, out7, unit="MM", watertight=True, sew_tol=1e-6)
+    print("[info] patch watertight export:", info7)
+    r7 = STEPControl_Reader(); r7.ReadFile(out7); r7.TransferRoots(); sh7 = r7.OneShape()
+    n7 = 0
+    e7 = TopExp_Explorer(sh7, TopAbs_SOLID)
+    while e7.More():
+        n7 += 1
+        e7.Next()
+    pr7 = GProp_GProps(); BRepGProp.VolumeProperties_s(sh7, pr7); v7 = pr7.Mass()
+    print(f"[info] patched solid: solids={n7} volume={v7:.3f} (expected 8.0)")
+    if n7 != 1 or abs(v7 - 8.0) > 0.01:
+        fail(f"mesh patch did not sew into the box (solids={n7}, vol={v7:.3f})")
+    print("[ok] MESH_PATCH: faceted side sewn with analytic planes → closed solid")
+    try:
+        os.remove(out7)
+    except OSError:
+        pass
+
     # Fillet (#5): a 90° edge fillet exports as a trimmed cylindrical patch.
     from reverse_mesh import step_export
     fillet = [{"kind": "FILLET", "name": "fl", "params": {

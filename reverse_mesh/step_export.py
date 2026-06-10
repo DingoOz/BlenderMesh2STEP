@@ -31,6 +31,7 @@ DEFAULT_COLORS = {
     "CONE": (0.85, 0.55, 0.30),
     "SPHERE": (0.50, 0.80, 0.40),
     "TORUS": (0.80, 0.40, 0.62),
+    "MESH_PATCH": (0.75, 0.72, 0.55),
 }
 
 # Colour forced onto SUBTRACT features in cutter_mode='MARK' so they read as
@@ -457,6 +458,45 @@ def _box_item(w, p):
                  f"{w.closed_shell(faces)})"), True
 
 
+def _mesh_patch_item(w, p):
+    """Leftover mesh region → faceted planar triangles in a surface model.
+
+    ``params`` carry ``verts`` (world points) and ``tris`` (vertex-index triples).
+    Each triangle becomes its own ADVANCED_FACE on a PLANE; edges are not shared
+    between triangles, which a SHELL_BASED_SURFACE_MODEL permits. Degenerate
+    (zero-area) triangles are skipped.
+    """
+    verts = [tuple(float(c) for c in v) for v in p["verts"]]
+    vertex_ids = {}
+
+    def vid(i):
+        if i not in vertex_ids:
+            vertex_ids[i] = w.vertex(verts[i])
+        return vertex_ids[i]
+
+    faces = []
+    for tri in p["tris"]:
+        ia, ib, ic = (int(i) for i in tri)
+        a, b, c = verts[ia], verts[ib], verts[ic]
+        n = _cross(_sub(b, a), _sub(c, a))
+        if _norm(n) < _EPS:
+            continue
+        oeds = []
+        for i0, i1 in ((ia, ib), (ib, ic), (ic, ia)):
+            p0, p1 = verts[i0], verts[i1]
+            ln = w.line(p0, _unit(_sub(p1, p0)))
+            ec = w.edge_curve(vid(i0), vid(i1), ln, True)
+            oeds.append(w.oriented_edge(ec, True))
+        bound = w.face_outer_bound(w.edge_loop(oeds), True)
+        centroid = _scale(_add(_add(a, b), c), 1.0 / 3.0)
+        surf = w.add(f"PLANE('',{w.axis2(centroid, _unit(n), _unit(_sub(b, a)))})")
+        faces.append(w.advanced_face("leftover", [bound], surf, True))
+    if not faces:
+        return None, False
+    shell = w.open_shell(faces)
+    return w.add(f"SHELL_BASED_SURFACE_MODEL('',({shell}))"), False
+
+
 _BUILDERS = {
     "PLANE": _plane_item,
     "BOX": _box_item,
@@ -465,6 +505,7 @@ _BUILDERS = {
     "SPHERE": _sphere_item,
     "TORUS": _torus_item,
     "FILLET": _fillet_item,
+    "MESH_PATCH": _mesh_patch_item,
 }
 
 
@@ -504,6 +545,8 @@ def build_step(features, *, unit="MM", product_name="Reverse",
             params = dict(params, name_prefix="cutter:")
             color = CUTTER_COLOR
         item_id, is_solid = builder(w, params)
+        if item_id is None:                       # e.g. an all-degenerate mesh patch
+            continue
         items.append((item_id, is_solid))
         styled.append(_style(w, item_id, color))
 
