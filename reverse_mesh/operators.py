@@ -16,7 +16,8 @@ from bpy.types import Operator
 from bpy_extras.io_utils import ExportHelper
 from mathutils import Matrix, Vector
 
-from . import build, occ_export, overlay, pmi_export, step_export, units
+from . import build, forward, occ_export, overlay, pmi_export, step_export, units
+from . import properties as props_mod
 from .fitting import (
     FITTERS, MeshGraph, Region, classify_arrangement, fit_auto, fit_fillet,
     fit_robust, match_cylinders, optimize_decomposition, signed_distances,
@@ -256,7 +257,8 @@ def _add_leftover_feature(context, settings, obj, n_faces):
     return item
 
 
-def _add_built_feature(context, settings, result, obj, group):
+def _add_built_feature(context, settings, result, obj, group, *,
+                       operation="ADD", cut_mode="THROUGH"):
     """Append a feature for a machine-built primitive, tagged with ``group``."""
     item = settings.features.add()
     item.kind = result.kind
@@ -265,8 +267,8 @@ def _add_built_feature(context, settings, result, obj, group):
     item.rms = result.rms
     item.max_error = result.max_error
     item.object_name = obj.name
-    item.operation = "ADD"
-    item.cut_mode = "THROUGH"
+    item.operation = operation
+    item.cut_mode = cut_mode
     item.source_object = obj.name
     settings.active_feature = len(settings.features) - 1
     return item
@@ -1115,6 +1117,167 @@ class REVERSE_OT_clear_solid_set(Operator):
         return {"FINISHED"}
 
 
+# --- Forward building: STEP primitives from typed dimensions --------------------
+
+
+class REVERSE_OT_add_primitive(Operator):
+    """Add a STEP-exportable primitive solid at the 3D cursor"""
+
+    bl_idname = "reverse.add_primitive"
+    bl_label = "Add STEP Primitive"
+    bl_options = {"REGISTER", "UNDO"}
+
+    kind: EnumProperty(name="Primitive", items=props_mod.BUILD_PRIMITIVE_ITEMS,
+                       default="BOX")
+    radius: FloatProperty(name="Radius", min=1e-6, default=1.0, unit="LENGTH")
+    height: FloatProperty(name="Height", min=1e-6, default=2.0, unit="LENGTH")
+    radius1: FloatProperty(name="Base radius", min=0.0, default=1.0, unit="LENGTH")
+    radius2: FloatProperty(name="Top radius", min=0.0, default=0.5, unit="LENGTH")
+    major_radius: FloatProperty(name="Major radius", min=1e-6, default=1.0,
+                                unit="LENGTH")
+    minor_radius: FloatProperty(name="Minor radius", min=1e-6, default=0.25,
+                                unit="LENGTH")
+    hx: FloatProperty(name="Half X", min=1e-6, default=1.0, unit="LENGTH")
+    hy: FloatProperty(name="Half Y", min=1e-6, default=1.0, unit="LENGTH")
+    hz: FloatProperty(name="Half Z", min=1e-6, default=1.0, unit="LENGTH")
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == "OBJECT"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.prop(self, "kind")
+        for key, _label in forward.PARAM_FIELDS[self.kind]:
+            layout.prop(self, key)
+
+    def invoke(self, context, event):
+        # Default the kind from the Build panel's selector unless set explicitly.
+        if not self.properties.is_property_set("kind"):
+            self.kind = context.scene.reverse.build_primitive_type
+        return self.execute(context)
+
+    def execute(self, context):
+        settings = context.scene.reverse
+        dims = {key: getattr(self, key) for key, _label in forward.PARAM_FIELDS[self.kind]}
+        if self.kind == "CONE" and dims["radius1"] <= 0.0 and dims["radius2"] <= 0.0:
+            self.report({"WARNING"}, "Cone needs at least one non-zero radius")
+            return {"CANCELLED"}
+        params = forward.make_params(self.kind, dims, context.scene.cursor.location)
+        result = forward.make_result(self.kind, params)
+        obj = build.build_object(context, result, segments=settings.segments,
+                                 operation=settings.default_operation,
+                                 cut_mode=settings.default_cut_mode)
+        data = {k: obj["reverse"][k] for k in obj["reverse"].keys()}
+        data["group"] = "BUILD"
+        obj["reverse"] = data
+        obj.name = f"Build_{self.kind.title()}"
+        obj.data.name = obj.name
+        _add_built_feature(context, settings, result, obj, "BUILD",
+                           operation=settings.default_operation,
+                           cut_mode=settings.default_cut_mode)
+        for o in context.selected_objects:
+            o.select_set(False)
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
+        props_mod.sync_build_params(obj)   # make the panel fields live immediately
+        self.report({"INFO"}, result.summary)
+        return {"FINISHED"}
+
+
+class REVERSE_OT_edit_params(Operator):
+    """Load this primitive's stored dimensions into the editable panel fields"""
+
+    bl_idname = "reverse.edit_params"
+    bl_label = "Edit Parameters"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and "reverse" in obj
+
+    def execute(self, context):
+        if not props_mod.sync_build_params(context.active_object):
+            self.report({"WARNING"}, "Active object has no editable primitive parameters")
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class REVERSE_OT_rebuild_feature(Operator):
+    """Regenerate this primitive's mesh from its stored parameters (fixes drift)"""
+
+    bl_idname = "reverse.rebuild_feature"
+    bl_label = "Rebuild from Parameters"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return (obj is not None and "reverse" in obj and context.mode == "OBJECT"
+                and obj["reverse"]["kind"] != "MESH_PATCH")
+
+    def execute(self, context):
+        obj = context.active_object
+        try:
+            forward.rebuild_object(obj, segments=context.scene.reverse.segments)
+        except (ValueError, KeyError) as exc:
+            self.report({"WARNING"}, f"Cannot rebuild {obj.name}: {exc}")
+            return {"CANCELLED"}
+        props_mod.sync_build_params(obj)
+        self.report({"INFO"}, f"{obj.name} rebuilt from stored parameters")
+        return {"FINISHED"}
+
+
+class REVERSE_OT_bake_scale(Operator):
+    """Fold the object's uniform scale into its stored dimensions and reset scale"""
+
+    bl_idname = "reverse.bake_scale"
+    bl_label = "Bake Scale into Parameters"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return (obj is not None and "reverse" in obj and context.mode == "OBJECT"
+                and obj["reverse"]["kind"] in _PARAM_KINDS)
+
+    def execute(self, context):
+        obj = context.active_object
+        data = obj.get("reverse")
+        kind = data["kind"]
+        s = obj.scale
+        comps = sorted(abs(c) for c in s)
+        if comps[0] <= 1e-12:
+            self.report({"WARNING"}, "Object has a zero scale component")
+            return {"CANCELLED"}
+        if comps[2] / comps[0] > 1.001 and kind != "BOX":
+            self.report({"WARNING"},
+                        "Non-uniform scale on a curved primitive cannot be baked — "
+                        "clear the scale instead (Alt+S)")
+            return {"CANCELLED"}
+        factor = (abs(s.x) + abs(s.y) + abs(s.z)) / 3.0
+        new = {k: data[k] for k in data.keys()}
+        for key in _PARAM_KINDS[kind]["lengths"]:
+            if key in new:
+                new[key] = float(new[key]) * factor
+        obj["reverse"] = new
+        obj.scale = (1.0, 1.0, 1.0)
+        # matrix_world is lazily evaluated — flush the scale change before the
+        # rebuild reads it, or the old scale leaks back in via the xform delta.
+        context.view_layer.update()
+        forward.rebuild_object(obj, segments=context.scene.reverse.segments)
+        props_mod.sync_build_params(obj)
+        # Keep the stack summary truthful after the dimension change.
+        d = obj["reverse"]
+        for f in context.scene.reverse.features:
+            if f.object_name == obj.name:
+                f.summary = summarize(kind, {k: d[k] for k in d.keys()})
+        self.report({"INFO"}, f"Scale ×{factor:.4g} baked into {obj.name}")
+        return {"FINISHED"}
+
+
 # String/bool metadata params that round-trip verbatim from obj["reverse"] into
 # the export feature dict (set by features that tag geometry — fillet role,
 # thread spec, counterbore preset). Numeric feature params instead extend the
@@ -1353,6 +1516,7 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
         items=[
             ("ALL", "All", "Export every fitted primitive"),
             ("MANUAL", "Manual only", "Export only the hand-fit feature stack"),
+            ("BUILD", "Built only", "Export only the forward-built STEP primitives"),
             ("AUTO", "Auto only", "Export only the whole-mesh surface auto-decomposed set"),
             ("BOOL", "Solid only", "Export only the volumetric solid/boolean set"),
         ],
@@ -1461,6 +1625,7 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
 
         sources = context.selected_objects if self.use_selection else context.scene.objects
         features = []
+        drift_warnings = []
         for o in sources:
             if o.type == "MESH" and "reverse" in o:
                 if self.group_filter != "ALL":
@@ -1470,6 +1635,11 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
                 feat = _feature_from_object(o, eff_scale)
                 if feat is not None:
                     features.append(feat)
+                    msg = forward.drift_status(o)
+                    if msg:
+                        drift_warnings.append(f"⚠ {o.name}: {msg}")
+        for msg in drift_warnings:
+            self.report({"WARNING"}, msg)
 
         if not self.include_leftovers:
             features = [f for f in features if f["kind"] != "MESH_PATCH"]
@@ -1513,7 +1683,8 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
                                          sew_tol=self.sew_tolerance,
                                          auto_stitch=self.auto_stitch,
                                          ordered=self.ordered_booleans)
-                context.scene.reverse.last_report = _format_report(info)
+                context.scene.reverse.last_report = "\n".join(
+                    drift_warnings + [_format_report(info)])
                 self.report({"INFO"}, f"Exported via OCCT: {info}")
                 return {"FINISHED"}
             except Exception as exc:
@@ -1537,7 +1708,7 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
         with open(self.filepath, "w", encoding="ascii", errors="replace") as fp:
             fp.write(text)
 
-        report_lines = []
+        report_lines = list(drift_warnings)
         if n_cut:
             verb = {"SKIP": "skipped",
                     "MARK": "written as red 'cutter:' reference solids",
@@ -1651,6 +1822,10 @@ def _reconcile_features(_dummy):
 
 
 classes = (
+    REVERSE_OT_add_primitive,
+    REVERSE_OT_edit_params,
+    REVERSE_OT_rebuild_feature,
+    REVERSE_OT_bake_scale,
     REVERSE_OT_fit_selection,
     REVERSE_OT_auto_decompose,
     REVERSE_OT_clear_auto_set,

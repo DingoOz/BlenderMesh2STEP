@@ -139,3 +139,13 @@
 - **Root cause:** The `op` field was added for the OCCT backend; the pure-Python writer's feature loop predates it and was never taught to even acknowledge the role.
 - **Fix applied:** `build_step` gained `cutter_mode` (SOLID legacy / MARK red `cutter:` reference solids / SKIP); the export operator defaults to MARK on the pure-Python path and reports a warning whenever cutters cannot be subtracted.
 - **Prevention rule:** When a schema field changes meaning of the geometry (boolean role, cut mode), every writer/consumer must either honour it or explicitly surface that it cannot — grep all consumers of the feature dict when adding such a field.
+
+### Stale lazy matrix_world read after setting obj.scale — 2026-06-11
+
+- **Severity:** Medium
+- **Category:** API Misuse
+- **File(s):** `reverse_mesh/operators.py` (REVERSE_OT_bake_scale), `reverse_mesh/forward.py`
+- **Pattern:** Writing a transform channel (`obj.scale = ...`) and then, in the same execution, reading `obj.matrix_world` expecting it to reflect the write. Blender evaluates `matrix_world` lazily via the depsgraph, so the read returns the pre-write matrix; any math built on it (here, the `_xform`→`matrix_world` delta used to re-anchor a rebuilt primitive) silently bakes the old transform back in.
+- **Root cause:** Treated `matrix_world` as a plain derived attribute rather than a depsgraph-evaluated one; the bake-scale operator cleared the scale and immediately rebuilt, so the rebuild's delta still contained the old scale and re-applied it.
+- **Fix applied:** Call `context.view_layer.update()` between the scale write and the rebuild so `matrix_world` is current when the delta is computed; the integration test asserts the scale is actually 1 after baking.
+- **Prevention rule:** After mutating `location`/`rotation`/`scale` (or parenting), never read `matrix_world` in the same operator without an intervening `view_layer.update()` (or compose the matrix yourself); add a test asserting the post-condition on the evaluated transform.

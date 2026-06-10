@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Scene-level settings and the running list of fitted features."""
 
+import math
+
 import bpy
 from bpy.props import (
     BoolProperty,
@@ -24,6 +26,126 @@ PRIMITIVE_ITEMS = [
     ("TORUS", "Torus", "Toroidal face / ring (best on full rings)", "MESH_TORUS", 5),
     ("FILLET", "Fillet", "Edge fillet / round → a trimmed partial cylinder", "MOD_BEVEL", 7),
 ]
+
+
+BUILD_PRIMITIVE_ITEMS = [
+    ("BOX", "Box", "A cuboid solid", "MESH_CUBE", 0),
+    ("CYLINDER", "Cylinder", "A cylindrical solid", "MESH_CYLINDER", 1),
+    ("CONE", "Cone", "A conical / tapered solid (frustum)", "MESH_CONE", 2),
+    ("SPHERE", "Sphere", "A spherical solid", "MESH_UVSPHERE", 3),
+    ("TORUS", "Torus", "A toroidal solid (ring)", "MESH_TORUS", 4),
+]
+
+
+# Guard against update-callback recursion: sync_build_params() writes the
+# PropertyGroup programmatically, which would otherwise re-fire the rebuild.
+_updating_build_params = False
+
+
+def _on_build_param_update(self, context):
+    """A dimension field changed: write through to obj["reverse"] and rebuild."""
+    global _updating_build_params
+    if _updating_build_params:
+        return
+    obj = self.id_data
+    data = obj.get("reverse") if obj else None
+    if data is None:
+        return
+    from . import forward
+
+    kind = data["kind"]
+    fields = forward.PARAM_FIELDS.get(kind)
+    if not fields:
+        return
+    new = {k: data[k] for k in data.keys()}
+    for key, _label in fields:
+        new[key] = float(getattr(self, key))
+    if kind == "CONE":
+        h = new["height"]
+        new["half_angle"] = (math.atan(abs(new["radius2"] - new["radius1"]) / h)
+                             if h > 1e-12 else 0.0)
+    # Reassign the whole dict: nested IDProperty writes don't reliably tag updates.
+    obj["reverse"] = new
+    segments = 48
+    scene = getattr(context, "scene", None)
+    if scene is not None and hasattr(scene, "reverse"):
+        segments = scene.reverse.segments
+        from .fitting.primitives import summarize
+        for f in scene.reverse.features:
+            if f.object_name == obj.name:
+                f.summary = summarize(kind, new)
+    forward.rebuild_object(obj, segments)
+
+
+def sync_build_params(obj):
+    """Copy obj["reverse"] dimension values into obj.reverse_build (no rebuild).
+
+    Must be called from an operator (or other writable context), never from a
+    panel ``draw()`` — Blender prohibits property writes there.
+    """
+    global _updating_build_params
+    data = obj.get("reverse") if obj else None
+    if data is None:
+        return False
+    from . import forward
+
+    fields = forward.PARAM_FIELDS.get(data["kind"])
+    if not fields:
+        return False
+    _updating_build_params = True
+    try:
+        for key, _label in fields:
+            if key in data.keys():
+                setattr(obj.reverse_build, key, float(data[key]))
+    finally:
+        _updating_build_params = False
+    return True
+
+
+def build_params_synced(obj):
+    """True when obj.reverse_build mirrors obj["reverse"] (read-only, draw-safe)."""
+    data = obj.get("reverse") if obj else None
+    if data is None:
+        return False
+    from . import forward
+
+    fields = forward.PARAM_FIELDS.get(data["kind"])
+    if not fields:
+        return False
+    for key, _label in fields:
+        if key not in data.keys():
+            return False
+        stored = float(data[key])
+        if abs(getattr(obj.reverse_build, key) - stored) > 1e-6 * max(1.0, abs(stored)):
+            return False
+    return True
+
+
+class ReverseBuildParams(PropertyGroup):
+    """Live-editable dimensions mirroring the active object's stored params.
+
+    Drawn by the Build panel; each edit writes through to ``obj["reverse"]``
+    and regenerates the mesh (see :func:`_on_build_param_update`).
+    """
+
+    radius: FloatProperty(name="Radius", min=1e-6, default=1.0, unit="LENGTH",
+                          update=_on_build_param_update)
+    height: FloatProperty(name="Height", min=1e-6, default=1.0, unit="LENGTH",
+                          update=_on_build_param_update)
+    radius1: FloatProperty(name="Base radius", min=0.0, default=1.0, unit="LENGTH",
+                           update=_on_build_param_update)
+    radius2: FloatProperty(name="Top radius", min=0.0, default=0.5, unit="LENGTH",
+                           update=_on_build_param_update)
+    major_radius: FloatProperty(name="Major radius", min=1e-6, default=1.0,
+                                unit="LENGTH", update=_on_build_param_update)
+    minor_radius: FloatProperty(name="Minor radius", min=1e-6, default=0.25,
+                                unit="LENGTH", update=_on_build_param_update)
+    hx: FloatProperty(name="Half X", min=1e-6, default=1.0, unit="LENGTH",
+                      update=_on_build_param_update)
+    hy: FloatProperty(name="Half Y", min=1e-6, default=1.0, unit="LENGTH",
+                      update=_on_build_param_update)
+    hz: FloatProperty(name="Half Z", min=1e-6, default=1.0, unit="LENGTH",
+                      update=_on_build_param_update)
 
 
 def _on_thread_update(self, context):
@@ -104,6 +226,12 @@ class ReverseSettings(PropertyGroup):
         description="Which analytic surface to fit to the selected faces",
         items=PRIMITIVE_ITEMS,
         default="AUTO",
+    )
+    build_primitive_type: EnumProperty(
+        name="Primitive",
+        description="Which STEP solid to add (forward building block)",
+        items=BUILD_PRIMITIVE_ITEMS,
+        default="BOX",
     )
     create_object: BoolProperty(
         name="Create clean object",
@@ -320,16 +448,18 @@ class ReverseSettings(PropertyGroup):
     last_report: StringProperty(name="Last export report", default="")
 
 
-classes = (ReverseFeature, ReverseSettings)
+classes = (ReverseFeature, ReverseSettings, ReverseBuildParams)
 
 
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.reverse = PointerProperty(type=ReverseSettings)
+    bpy.types.Object.reverse_build = PointerProperty(type=ReverseBuildParams)
 
 
 def unregister():
+    del bpy.types.Object.reverse_build
     del bpy.types.Scene.reverse
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
