@@ -2,7 +2,7 @@ schema_version = "1.0.0"
 
 # Extension identity
 id = "reverse_mesh"
-version = "0.10.0"
+version = "0.11.0"
 name = "Reverse — Mesh to Parametric"
 tagline = "Fit clean CAD primitives to selected mesh regions"
 maintainer = "Nigel Hungerford-Symes <nigel.hungerfordsymes@gmail.com>"
