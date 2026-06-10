@@ -137,6 +137,39 @@ def main():
     n_dims = ptext.count("DIMENSIONAL_SIZE(")
     check("semantic pmi dimension count", n_dims >= 5, f"got {n_dims}")  # cyl/cone/sph/torus/fillet
 
+    # Cutter handling: the writer has no boolean kernel, so SUBTRACT features
+    # are skipped / marked / written as-is per cutter_mode.
+    cut_feats = [
+        {"kind": "BOX", "name": "body", "params": {
+            "center": (0, 0, 0), "ax": (1, 0, 0), "ay": (0, 1, 0), "az": (0, 0, 1),
+            "hx": 2.0, "hy": 2.0, "hz": 2.0}, "op": "ADD"},
+        {"kind": "CYLINDER", "name": "hole", "params": {
+            "base": (0, 0, 0), "axis": (0, 0, 1), "radius": 0.5, "height": 5.0},
+         "op": "SUBTRACT"},
+    ]
+    legacy = se.build_step(cut_feats, unit="MM")
+    default = se.build_step(cut_feats, unit="MM", cutter_mode="SOLID")
+    check("cutter default is legacy SOLID", legacy == default)
+    check("cutter SOLID writes both solids",
+          legacy.count("MANIFOLD_SOLID_BREP(") == 2)
+
+    skipped = se.build_step(cut_feats, unit="MM", cutter_mode="SKIP")
+    check("cutter SKIP drops the cutter",
+          skipped.count("MANIFOLD_SOLID_BREP(") == 1
+          and "CYLINDRICAL_SURFACE(" not in skipped)
+    sdefs = set(re.findall(r"^#(\d+)=", skipped, re.MULTILINE))
+    srefs = set(re.findall(r"#(\d+)", skipped.split("DATA;", 1)[1]))
+    check("cutter SKIP no dangling refs", not (srefs - sdefs))
+
+    marked = se.build_step(cut_feats, unit="MM", cutter_mode="MARK")
+    check("cutter MARK keeps both solids",
+          marked.count("MANIFOLD_SOLID_BREP(") == 2)
+    check("cutter MARK names the cutter", "'cutter:cylinder'" in marked)
+    r, g, b = se.CUTTER_COLOR
+    check("cutter MARK forces red colour",
+          f"COLOUR_RGB('',{se._num(r)},{se._num(g)},{se._num(b)})" in marked)
+    check("cutter MARK leaves the body name alone", "'cutter:box'" not in marked)
+
     print(f"\n{'ALL STEP CHECKS PASSED' if ok else 'STEP CHECKS FAILED'}")
     sys.exit(0 if ok else 1)
 

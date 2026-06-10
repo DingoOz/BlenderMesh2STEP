@@ -12,6 +12,8 @@ A *feature* handed to :func:`build_step` is a dict with keys:
     params : the kind's analytic parameters, in the target unit, world space
     name   : display name for the solid
     color  : optional (r, g, b) in 0..1
+    op     : optional 'ADD' | 'SUBTRACT' — this writer has no boolean kernel, so
+             SUBTRACT features are handled per ``cutter_mode`` (see build_step)
 
 All vectors/points are plain tuples or lists of three floats.
 """
@@ -30,6 +32,10 @@ DEFAULT_COLORS = {
     "SPHERE": (0.50, 0.80, 0.40),
     "TORUS": (0.80, 0.40, 0.62),
 }
+
+# Colour forced onto SUBTRACT features in cutter_mode='MARK' so they read as
+# reference geometry, not part material.
+CUTTER_COLOR = (0.85, 0.25, 0.25)
 
 _EPS = 1e-9
 
@@ -169,6 +175,7 @@ def _solid_name(base, p):
     """
     spec = p.get("thread_spec")
     name = f"{base} thread {spec}" if spec else base
+    name = p.get("name_prefix", "") + name
     return name.replace("'", "''")
 
 
@@ -355,7 +362,8 @@ def _sphere_item(w, p):
     e_mer = w.edge_curve(south, north, meridian, True)
     loop = w.edge_loop([w.oriented_edge(e_mer, True), w.oriented_edge(e_mer, False)])
     face = w.advanced_face("sphere", [w.face_outer_bound(loop, True)], surf, True)
-    return w.add(f"MANIFOLD_SOLID_BREP('sphere',{w.closed_shell([face])})"), True
+    return w.add(f"MANIFOLD_SOLID_BREP('{_solid_name('sphere', p)}',"
+                 f"{w.closed_shell([face])})"), True
 
 
 def _torus_item(w, p):
@@ -382,7 +390,8 @@ def _torus_item(w, p):
         w.oriented_edge(e_major, False),
     ])
     face = w.advanced_face("torus", [w.face_outer_bound(loop, True)], surf, True)
-    return w.add(f"MANIFOLD_SOLID_BREP('torus',{w.closed_shell([face])})"), True
+    return w.add(f"MANIFOLD_SOLID_BREP('{_solid_name('torus', p)}',"
+                 f"{w.closed_shell([face])})"), True
 
 
 def _box_item(w, p):
@@ -444,7 +453,8 @@ def _box_item(w, p):
         face([(i, j, 0) for i in (0, 1) for j in (0, 1)], _scale(az, -1)),
         face([(i, j, 1) for i in (0, 1) for j in (0, 1)], az),
     ]
-    return w.add(f"MANIFOLD_SOLID_BREP('box',{w.closed_shell(faces)})"), True
+    return w.add(f"MANIFOLD_SOLID_BREP('{_solid_name('box', p)}',"
+                 f"{w.closed_shell(faces)})"), True
 
 
 _BUILDERS = {
@@ -461,13 +471,20 @@ _BUILDERS = {
 # --- top-level assembly + product structure -----------------------------------
 
 def build_step(features, *, unit="MM", product_name="Reverse",
-               author="", organization="", timestamp="", filename="", pmi=False):
+               author="", organization="", timestamp="", filename="", pmi=False,
+               cutter_mode="SOLID"):
     """Return the full STEP file text for ``features``.
 
     ``unit`` is one of 'MM', 'M', 'IN' (controls only the declared SI unit/prefix;
     coordinates are written as given). Items are assembled into one shape
     representation with colour styling. With ``pmi=True`` each feature-of-size also
     gets a semantic AP242 dimension (DIMENSIONAL_SIZE) carrying its nominal value.
+
+    This writer has no boolean kernel, so features with op='SUBTRACT' cannot be
+    cut from the part. ``cutter_mode`` picks what to do with them instead:
+      'SOLID' — write them as plain additive solids (legacy behaviour)
+      'MARK'  — write them, but red and named 'cutter:…' so they read as reference
+      'SKIP'  — omit them entirely
     """
     w = StepWriter()
 
@@ -478,9 +495,16 @@ def build_step(features, *, unit="MM", product_name="Reverse",
         builder = _BUILDERS.get(kind)
         if builder is None:
             continue
-        item_id, is_solid = builder(w, feat["params"])
-        items.append((item_id, is_solid))
+        is_cutter = feat.get("op") == "SUBTRACT"
+        if is_cutter and cutter_mode == "SKIP":
+            continue
+        params = feat["params"]
         color = feat.get("color") or DEFAULT_COLORS.get(kind, (0.7, 0.7, 0.7))
+        if is_cutter and cutter_mode == "MARK":
+            params = dict(params, name_prefix="cutter:")
+            color = CUTTER_COLOR
+        item_id, is_solid = builder(w, params)
+        items.append((item_id, is_solid))
         styled.append(_style(w, item_id, color))
 
     # Geometric context with units + uncertainty.

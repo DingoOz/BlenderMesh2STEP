@@ -1265,6 +1265,23 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
         ),
         default=False,
     )
+    py_cutters: EnumProperty(
+        name="Cutters (pure Python)",
+        description=(
+            "The pure-Python writer has no boolean kernel, so SUBTRACT features "
+            "cannot be cut from the part. Choose what to write instead"
+        ),
+        items=[
+            ("MARK", "Include marked",
+             "Write cutters as red 'cutter:' reference solids so they are visibly "
+             "not part material"),
+            ("SKIP", "Skip",
+             "Omit subtractive features from the file entirely"),
+            ("SOLID", "Include as solids",
+             "Legacy: write cutters as plain additive solids (holes appear filled)"),
+        ],
+        default="MARK",
+    )
 
     @classmethod
     def poll(cls, context):
@@ -1316,6 +1333,12 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
             except Exception as exc:
                 self.report({"WARNING"}, f"OCCT export failed ({exc}); using pure-Python")
 
+        n_cut = sum(1 for f in features if f.get("op") == "SUBTRACT")
+        if n_cut == len(features) and self.py_cutters == "SKIP":
+            self.report({"WARNING"},
+                        "All features are cutters and 'Cutters' is set to Skip — nothing to export")
+            return {"CANCELLED"}
+
         text = step_export.build_step(
             features,
             unit=self.unit,
@@ -1323,14 +1346,25 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
             timestamp=datetime.datetime.now().isoformat(timespec="seconds"),
             filename=os.path.basename(self.filepath),
             pmi=self.semantic_pmi,
+            cutter_mode=self.py_cutters,
         )
         with open(self.filepath, "w", encoding="ascii", errors="replace") as fp:
             fp.write(text)
 
-        context.scene.reverse.last_report = (
+        report_lines = []
+        if n_cut:
+            verb = {"SKIP": "skipped",
+                    "MARK": "written as red 'cutter:' reference solids",
+                    "SOLID": "written as plain solids (holes appear filled)"}[self.py_cutters]
+            msg = f"Pure-Python writer cannot subtract — {n_cut} cutter(s) {verb}"
+            self.report({"WARNING"}, msg)
+            report_lines.append(msg)
+        report_lines.append(
             "Validation (volumes / watertightness) requires the OCCT kernel.\n"
             "Install it from the panel to get a per-solid report.")
-        self.report({"INFO"}, f"Exported {len(features)} primitives → {os.path.basename(self.filepath)}")
+        context.scene.reverse.last_report = "\n".join(report_lines)
+        n_written = len(features) - (n_cut if self.py_cutters == "SKIP" else 0)
+        self.report({"INFO"}, f"Exported {n_written} primitives → {os.path.basename(self.filepath)}")
         return {"FINISHED"}
 
 
