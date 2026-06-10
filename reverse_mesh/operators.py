@@ -1192,6 +1192,15 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
         description="Fuse all fitted solids into a single watertight body (OCCT only)",
         default=False,
     )
+    ordered_booleans: BoolProperty(
+        name="Booleans in stack order",
+        description=(
+            "Apply ADD/SUBTRACT in the feature-stack order, so an ADD placed "
+            "after a cut refills it (e.g. a boss inside a pocket). Off = legacy: "
+            "fuse every ADD first, then apply all cutters (OCCT only)"
+        ),
+        default=True,
+    )
     cutter_overshoot: FloatProperty(
         name="Cutter overshoot",
         description=(
@@ -1332,6 +1341,7 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
         box = layout.box()
         box.label(text="Booleans / healing (OCCT)")
         box.prop(self, "merge_solids")
+        box.prop(self, "ordered_booleans")
         box.prop(self, "cutter_overshoot")
         box.prop(self, "auto_stitch")
         box.prop(self, "make_watertight")
@@ -1374,6 +1384,11 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
             self.report({"WARNING"}, "No fitted (Reverse) objects found to export")
             return {"CANCELLED"}
 
+        # Order features by their position in the feature stack (the order the
+        # user arranged in the panel); objects not in the stack keep scene order.
+        rank = {f.object_name: i for i, f in enumerate(context.scene.reverse.features)}
+        features.sort(key=lambda f: rank.get(f["name"], len(rank)))
+
         name = os.path.splitext(os.path.basename(self.filepath))[0] or "Reverse"
 
         if self.write_pmi_sidecar:
@@ -1396,7 +1411,8 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
                                          overshoot=self.cutter_overshoot,
                                          watertight=self.make_watertight,
                                          sew_tol=self.sew_tolerance,
-                                         auto_stitch=self.auto_stitch)
+                                         auto_stitch=self.auto_stitch,
+                                         ordered=self.ordered_booleans)
                 context.scene.reverse.last_report = _format_report(info)
                 self.report({"INFO"}, f"Exported via OCCT: {info}")
                 return {"FINISHED"}
