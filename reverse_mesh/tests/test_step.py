@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pmi_export  # noqa: E402
 import step_export as se  # noqa: E402
+import units  # noqa: E402
 
 
 def _features():
@@ -136,6 +137,81 @@ def main():
           f"missing {sorted(prefs - pdefs)[:5]}")
     n_dims = ptext.count("DIMENSIONAL_SIZE(")
     check("semantic pmi dimension count", n_dims >= 5, f"got {n_dims}")  # cyl/cone/sph/torus/fillet
+
+    # Cutter handling: the writer has no boolean kernel, so SUBTRACT features
+    # are skipped / marked / written as-is per cutter_mode.
+    cut_feats = [
+        {"kind": "BOX", "name": "body", "params": {
+            "center": (0, 0, 0), "ax": (1, 0, 0), "ay": (0, 1, 0), "az": (0, 0, 1),
+            "hx": 2.0, "hy": 2.0, "hz": 2.0}, "op": "ADD"},
+        {"kind": "CYLINDER", "name": "hole", "params": {
+            "base": (0, 0, 0), "axis": (0, 0, 1), "radius": 0.5, "height": 5.0},
+         "op": "SUBTRACT"},
+    ]
+    legacy = se.build_step(cut_feats, unit="MM")
+    default = se.build_step(cut_feats, unit="MM", cutter_mode="SOLID")
+    check("cutter default is legacy SOLID", legacy == default)
+    check("cutter SOLID writes both solids",
+          legacy.count("MANIFOLD_SOLID_BREP(") == 2)
+
+    skipped = se.build_step(cut_feats, unit="MM", cutter_mode="SKIP")
+    check("cutter SKIP drops the cutter",
+          skipped.count("MANIFOLD_SOLID_BREP(") == 1
+          and "CYLINDRICAL_SURFACE(" not in skipped)
+    sdefs = set(re.findall(r"^#(\d+)=", skipped, re.MULTILINE))
+    srefs = set(re.findall(r"#(\d+)", skipped.split("DATA;", 1)[1]))
+    check("cutter SKIP no dangling refs", not (srefs - sdefs))
+
+    marked = se.build_step(cut_feats, unit="MM", cutter_mode="MARK")
+    check("cutter MARK keeps both solids",
+          marked.count("MANIFOLD_SOLID_BREP(") == 2)
+    check("cutter MARK names the cutter", "'cutter:cylinder'" in marked)
+    r, g, b = se.CUTTER_COLOR
+    check("cutter MARK forces red colour",
+          f"COLOUR_RGB('',{se._num(r)},{se._num(g)},{se._num(b)})" in marked)
+    check("cutter MARK leaves the body name alone", "'cutter:box'" not in marked)
+
+    # Leftover mesh patch: triangles → faceted planar faces in a surface model;
+    # degenerate triangles are skipped.
+    patch = [{"kind": "MESH_PATCH", "name": "lo", "params": {
+        "verts": [(0, 0, 0), (1, 0, 0), (0, 1, 0), (1, 1, 0), (2, 2, 2)],
+        "tris": [(0, 1, 2), (1, 3, 2), (4, 4, 0)],   # last is degenerate
+    }}]
+    mtext = se.build_step(patch, unit="MM")
+    check("mesh patch face count", mtext.count("ADVANCED_FACE(") == 2,
+          f"got {mtext.count('ADVANCED_FACE(')}")
+    check("mesh patch is a surface model",
+          "SHELL_BASED_SURFACE_MODEL(" in mtext
+          and "MANIFOLD_SOLID_BREP(" not in mtext)
+    mdefs = set(re.findall(r"^#(\d+)=", mtext, re.MULTILINE))
+    mrefs = set(re.findall(r"#(\d+)", mtext.split("DATA;", 1)[1]))
+    check("mesh patch no dangling refs", not (mrefs - mdefs))
+    # An all-degenerate patch must not emit an empty shell (or crash).
+    empty = se.build_step(
+        [{"kind": "MESH_PATCH", "name": "x",
+          "params": {"verts": [(0, 0, 0)], "tris": [(0, 0, 0)]}}], unit="MM")
+    check("all-degenerate patch yields no shell",
+          "SHELL_BASED_SURFACE_MODEL(" not in empty)
+
+    # Unit-aware export scale (scene units → STEP units).
+    check("units: metric default scene → mm",
+          abs(units.effective_scale("MM", system="METRIC", scale_length=1.0) - 1000.0) < 1e-9)
+    check("units: mm-scale scene → mm passthrough",
+          abs(units.effective_scale("MM", system="METRIC", scale_length=0.001) - 1.0) < 1e-9)
+    check("units: metric scene → meters",
+          abs(units.effective_scale("M", system="METRIC", scale_length=1.0) - 1.0) < 1e-9)
+    check("units: inch-scale scene → inches",
+          abs(units.effective_scale("IN", system="IMPERIAL", scale_length=0.0254) - 1.0) < 1e-9)
+    check("units: unitless scene passes through",
+          units.effective_scale("MM", system="NONE", scale_length=123.0) == 1.0)
+    check("units: imperial scene defaults to IN",
+          units.step_unit_for_scene("IMPERIAL", "INCHES") == "IN")
+    check("units: meters display defaults to M",
+          units.step_unit_for_scene("METRIC", "METERS") == "M")
+    check("units: millimeter display defaults to MM",
+          units.step_unit_for_scene("METRIC", "MILLIMETERS") == "MM")
+    check("units: unitless scene defaults to MM",
+          units.step_unit_for_scene("NONE", "") == "MM")
 
     print(f"\n{'ALL STEP CHECKS PASSED' if ok else 'STEP CHECKS FAILED'}")
     sys.exit(0 if ok else 1)

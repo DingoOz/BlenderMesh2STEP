@@ -16,6 +16,46 @@ import numpy as np
 from mathutils import Matrix, Vector
 
 
+def generate_mesh(kind, params, segments: int = 48):
+    """Generate ``(verts, faces, matrix)`` for a primitive in its canonical frame.
+
+    ``params`` is the kind-specific schema (world-space points/dirs/lengths) used
+    throughout the add-on; ``matrix`` places the canonical-frame geometry in world
+    space. Shared by :func:`build_object` and the forward-build rebuild path.
+    """
+    if kind == "PLANE":
+        return _plane(params)
+    if kind == "BOX":
+        return _box(params)
+    if kind == "SPHERE":
+        return _sphere(params, segments)
+    if kind == "CYLINDER":
+        return _cylinder(params, segments)
+    if kind == "CONE":
+        return _cone(params, segments)
+    if kind == "TORUS":
+        return _torus(params, segments)
+    if kind == "FILLET":
+        return _fillet(params, segments)
+    raise ValueError(f"Unknown primitive kind: {kind}")
+
+
+def mesh_fingerprint(mesh) -> str:
+    """Cheap content fingerprint of a mesh, for drift detection.
+
+    Built primitives are small (a few hundred to ~1200 verts), so hashing every
+    vertex is fine. Coordinates are rounded so float noise from a round-trip
+    through ``from_pydata`` doesn't register as an edit.
+    """
+    import hashlib
+
+    h = hashlib.sha1()
+    h.update(f"{len(mesh.vertices)}:{len(mesh.polygons)}".encode())
+    for v in mesh.vertices:
+        h.update(f"{v.co.x:.6f},{v.co.y:.6f},{v.co.z:.6f};".encode())
+    return h.hexdigest()
+
+
 def build_object(context, result, segments: int = 48, operation: str = "ADD",
                  cut_mode: str = "THROUGH"):
     """Create and link a new mesh object representing ``result``.
@@ -27,22 +67,7 @@ def build_object(context, result, segments: int = 48, operation: str = "ADD",
     kind = result.kind
     p = result.params
 
-    if kind == "PLANE":
-        verts, faces, matrix = _plane(p)
-    elif kind == "BOX":
-        verts, faces, matrix = _box(p)
-    elif kind == "SPHERE":
-        verts, faces, matrix = _sphere(p, segments)
-    elif kind == "CYLINDER":
-        verts, faces, matrix = _cylinder(p, segments)
-    elif kind == "CONE":
-        verts, faces, matrix = _cone(p, segments)
-    elif kind == "TORUS":
-        verts, faces, matrix = _torus(p, segments)
-    elif kind == "FILLET":
-        verts, faces, matrix = _fillet(p, segments)
-    else:
-        raise ValueError(f"Unknown primitive kind: {kind}")
+    verts, faces, matrix = generate_mesh(kind, p, segments)
 
     mesh = bpy.data.meshes.new(f"Reverse_{kind.title()}")
     mesh.from_pydata([tuple(v) for v in verts], [], faces)
@@ -53,6 +78,7 @@ def build_object(context, result, segments: int = 48, operation: str = "ADD",
     params = _serialise_params(kind, p, result)
     # Record the placement so STEP export can follow later manual moves.
     params["_xform"] = [matrix[i][j] for i in range(4) for j in range(4)]
+    params["_fingerprint"] = mesh_fingerprint(mesh)
     params["op"] = operation
     params["cut"] = cut_mode
     obj["reverse"] = params

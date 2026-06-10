@@ -16,7 +16,8 @@ from bpy.types import Operator
 from bpy_extras.io_utils import ExportHelper
 from mathutils import Matrix, Vector
 
-from . import build, occ_export, overlay, pmi_export, step_export
+from . import build, forward, occ_export, overlay, pmi_export, step_export, units
+from . import properties as props_mod
 from .fitting import (
     FITTERS, MeshGraph, Region, classify_arrangement, fit_auto, fit_fillet,
     fit_robust, match_cylinders, optimize_decomposition, signed_distances,
@@ -218,7 +219,46 @@ def _move_to_collection(obj, coll):
     coll.objects.link(obj)
 
 
-def _add_built_feature(context, settings, result, obj, group):
+def _build_leftover_object(context, src_obj, face_indices, coll):
+    """Copy ``face_indices`` of ``src_obj`` into a 'Reverse_Leftover' mesh object.
+
+    The patch keeps the source's transform; the geometry lives in the object's
+    own mesh (nothing heavy in IDProperties) and is tagged kind='MESH_PATCH' so
+    the STEP export writes it as faceted planar faces.
+    """
+    keep = set(int(i) for i in face_indices)
+    bm = bmesh.new()
+    bm.from_mesh(src_obj.data)
+    bm.faces.ensure_lookup_table()
+    bmesh.ops.delete(bm, geom=[f for f in bm.faces if f.index not in keep],
+                     context="FACES")
+    mesh = bpy.data.meshes.new("Reverse_Leftover")
+    bm.to_mesh(mesh)
+    bm.free()
+    obj = bpy.data.objects.new("Reverse_Leftover", mesh)
+    obj.matrix_world = src_obj.matrix_world.copy()
+    coll.objects.link(obj)
+    obj["reverse"] = {"kind": "MESH_PATCH", "group": "AUTO",
+                      "op": "ADD", "cut": "THROUGH"}
+    return obj
+
+
+def _add_leftover_feature(context, settings, obj, n_faces):
+    """Append a feature-stack entry for a leftover mesh patch."""
+    item = settings.features.add()
+    item.kind = "MESH_PATCH"
+    item.group = "AUTO"
+    item.summary = f"Leftover · {n_faces} faces"
+    item.object_name = obj.name
+    item.operation = "ADD"
+    item.cut_mode = "THROUGH"
+    item.source_object = obj.name
+    settings.active_feature = len(settings.features) - 1
+    return item
+
+
+def _add_built_feature(context, settings, result, obj, group, *,
+                       operation="ADD", cut_mode="THROUGH"):
     """Append a feature for a machine-built primitive, tagged with ``group``."""
     item = settings.features.add()
     item.kind = result.kind
@@ -227,8 +267,8 @@ def _add_built_feature(context, settings, result, obj, group):
     item.rms = result.rms
     item.max_error = result.max_error
     item.object_name = obj.name
-    item.operation = "ADD"
-    item.cut_mode = "THROUGH"
+    item.operation = operation
+    item.cut_mode = cut_mode
     item.source_object = obj.name
     settings.active_feature = len(settings.features) - 1
     return item
@@ -779,6 +819,7 @@ class REVERSE_OT_auto_decompose(Operator):
         if obj.mode == "EDIT":
             bpy.ops.object.mode_set(mode="OBJECT")
         graph = _mesh_graph(obj)
+        self._src = obj
         wm = context.window_manager
         out = optimize_decomposition(
             graph,
@@ -804,6 +845,17 @@ class REVERSE_OT_auto_decompose(Operator):
         except (KeyError, TypeError):
             pass
         _add_built_feature(context, s, result, obj, "AUTO")
+
+    def _build_leftovers(self, context):
+        """Optionally keep the unexplained faces as a MESH_PATCH object."""
+        s = context.scene.reverse
+        out = getattr(self, "_out", None)
+        src = getattr(self, "_src", None)
+        if (not s.decompose_keep_leftovers or out is None or src is None
+                or not out.leftover_faces):
+            return
+        obj = _build_leftover_object(context, src, out.leftover_faces, self._coll)
+        _add_leftover_feature(context, s, obj, len(out.leftover_faces))
 
     def invoke(self, context, event):
         wm = context.window_manager
@@ -855,10 +907,13 @@ class REVERSE_OT_auto_decompose(Operator):
         out = getattr(self, "_out", None)
         cov = out.coverage if out else 0.0
         leftover = len(out.leftover_faces) if out else 0
+        self._build_leftovers(context)
         level = ({"WARNING"} if cov < context.scene.reverse.decompose_min_coverage
                  else {"INFO"})
+        kept = " (kept as Reverse_Leftover)" if (
+            leftover and context.scene.reverse.decompose_keep_leftovers) else ""
         self.report(level, f"Auto-decomposed into {self._built} primitives · "
-                           f"{cov * 100:.0f}% area covered ({leftover} faces left over)")
+                           f"{cov * 100:.0f}% area covered ({leftover} faces left over{kept})")
         return {"FINISHED"}
 
     def execute(self, context):
@@ -877,6 +932,7 @@ class REVERSE_OT_auto_decompose(Operator):
         for r in out.results:
             self._build_one(context, r)
             self._built += 1
+        self._build_leftovers(context)
         self.report({"INFO"}, f"Auto-decomposed into {self._built} primitives · "
                               f"{out.coverage * 100:.0f}% covered")
         return {"FINISHED"}
@@ -1061,6 +1117,167 @@ class REVERSE_OT_clear_solid_set(Operator):
         return {"FINISHED"}
 
 
+# --- Forward building: STEP primitives from typed dimensions --------------------
+
+
+class REVERSE_OT_add_primitive(Operator):
+    """Add a STEP-exportable primitive solid at the 3D cursor"""
+
+    bl_idname = "reverse.add_primitive"
+    bl_label = "Add STEP Primitive"
+    bl_options = {"REGISTER", "UNDO"}
+
+    kind: EnumProperty(name="Primitive", items=props_mod.BUILD_PRIMITIVE_ITEMS,
+                       default="BOX")
+    radius: FloatProperty(name="Radius", min=1e-6, default=1.0, unit="LENGTH")
+    height: FloatProperty(name="Height", min=1e-6, default=2.0, unit="LENGTH")
+    radius1: FloatProperty(name="Base radius", min=0.0, default=1.0, unit="LENGTH")
+    radius2: FloatProperty(name="Top radius", min=0.0, default=0.5, unit="LENGTH")
+    major_radius: FloatProperty(name="Major radius", min=1e-6, default=1.0,
+                                unit="LENGTH")
+    minor_radius: FloatProperty(name="Minor radius", min=1e-6, default=0.25,
+                                unit="LENGTH")
+    hx: FloatProperty(name="Half X", min=1e-6, default=1.0, unit="LENGTH")
+    hy: FloatProperty(name="Half Y", min=1e-6, default=1.0, unit="LENGTH")
+    hz: FloatProperty(name="Half Z", min=1e-6, default=1.0, unit="LENGTH")
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == "OBJECT"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.prop(self, "kind")
+        for key, _label in forward.PARAM_FIELDS[self.kind]:
+            layout.prop(self, key)
+
+    def invoke(self, context, event):
+        # Default the kind from the Build panel's selector unless set explicitly.
+        if not self.properties.is_property_set("kind"):
+            self.kind = context.scene.reverse.build_primitive_type
+        return self.execute(context)
+
+    def execute(self, context):
+        settings = context.scene.reverse
+        dims = {key: getattr(self, key) for key, _label in forward.PARAM_FIELDS[self.kind]}
+        if self.kind == "CONE" and dims["radius1"] <= 0.0 and dims["radius2"] <= 0.0:
+            self.report({"WARNING"}, "Cone needs at least one non-zero radius")
+            return {"CANCELLED"}
+        params = forward.make_params(self.kind, dims, context.scene.cursor.location)
+        result = forward.make_result(self.kind, params)
+        obj = build.build_object(context, result, segments=settings.segments,
+                                 operation=settings.default_operation,
+                                 cut_mode=settings.default_cut_mode)
+        data = {k: obj["reverse"][k] for k in obj["reverse"].keys()}
+        data["group"] = "BUILD"
+        obj["reverse"] = data
+        obj.name = f"Build_{self.kind.title()}"
+        obj.data.name = obj.name
+        _add_built_feature(context, settings, result, obj, "BUILD",
+                           operation=settings.default_operation,
+                           cut_mode=settings.default_cut_mode)
+        for o in context.selected_objects:
+            o.select_set(False)
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
+        props_mod.sync_build_params(obj)   # make the panel fields live immediately
+        self.report({"INFO"}, result.summary)
+        return {"FINISHED"}
+
+
+class REVERSE_OT_edit_params(Operator):
+    """Load this primitive's stored dimensions into the editable panel fields"""
+
+    bl_idname = "reverse.edit_params"
+    bl_label = "Edit Parameters"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and "reverse" in obj
+
+    def execute(self, context):
+        if not props_mod.sync_build_params(context.active_object):
+            self.report({"WARNING"}, "Active object has no editable primitive parameters")
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class REVERSE_OT_rebuild_feature(Operator):
+    """Regenerate this primitive's mesh from its stored parameters (fixes drift)"""
+
+    bl_idname = "reverse.rebuild_feature"
+    bl_label = "Rebuild from Parameters"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return (obj is not None and "reverse" in obj and context.mode == "OBJECT"
+                and obj["reverse"]["kind"] != "MESH_PATCH")
+
+    def execute(self, context):
+        obj = context.active_object
+        try:
+            forward.rebuild_object(obj, segments=context.scene.reverse.segments)
+        except (ValueError, KeyError) as exc:
+            self.report({"WARNING"}, f"Cannot rebuild {obj.name}: {exc}")
+            return {"CANCELLED"}
+        props_mod.sync_build_params(obj)
+        self.report({"INFO"}, f"{obj.name} rebuilt from stored parameters")
+        return {"FINISHED"}
+
+
+class REVERSE_OT_bake_scale(Operator):
+    """Fold the object's uniform scale into its stored dimensions and reset scale"""
+
+    bl_idname = "reverse.bake_scale"
+    bl_label = "Bake Scale into Parameters"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return (obj is not None and "reverse" in obj and context.mode == "OBJECT"
+                and obj["reverse"]["kind"] in _PARAM_KINDS)
+
+    def execute(self, context):
+        obj = context.active_object
+        data = obj.get("reverse")
+        kind = data["kind"]
+        s = obj.scale
+        comps = sorted(abs(c) for c in s)
+        if comps[0] <= 1e-12:
+            self.report({"WARNING"}, "Object has a zero scale component")
+            return {"CANCELLED"}
+        if comps[2] / comps[0] > 1.001 and kind != "BOX":
+            self.report({"WARNING"},
+                        "Non-uniform scale on a curved primitive cannot be baked — "
+                        "clear the scale instead (Alt+S)")
+            return {"CANCELLED"}
+        factor = (abs(s.x) + abs(s.y) + abs(s.z)) / 3.0
+        new = {k: data[k] for k in data.keys()}
+        for key in _PARAM_KINDS[kind]["lengths"]:
+            if key in new:
+                new[key] = float(new[key]) * factor
+        obj["reverse"] = new
+        obj.scale = (1.0, 1.0, 1.0)
+        # matrix_world is lazily evaluated — flush the scale change before the
+        # rebuild reads it, or the old scale leaks back in via the xform delta.
+        context.view_layer.update()
+        forward.rebuild_object(obj, segments=context.scene.reverse.segments)
+        props_mod.sync_build_params(obj)
+        # Keep the stack summary truthful after the dimension change.
+        d = obj["reverse"]
+        for f in context.scene.reverse.features:
+            if f.object_name == obj.name:
+                f.summary = summarize(kind, {k: d[k] for k in d.keys()})
+        self.report({"INFO"}, f"Scale ×{factor:.4g} baked into {obj.name}")
+        return {"FINISHED"}
+
+
 # String/bool metadata params that round-trip verbatim from obj["reverse"] into
 # the export feature dict (set by features that tag geometry — fillet role,
 # thread spec, counterbore preset). Numeric feature params instead extend the
@@ -1085,6 +1302,30 @@ _PARAM_KINDS = {
 }
 
 
+# Triangle count above which exporting a leftover MESH_PATCH draws a warning.
+_MESH_PATCH_WARN = 10_000
+
+
+def _mesh_patch_feature(obj, user_scale, data):
+    """Export feature for a leftover mesh patch: world-space triangles."""
+    mesh = obj.data
+    mesh.calc_loop_triangles()
+    mw = obj.matrix_world
+    s = user_scale
+    verts = []
+    for v in mesh.vertices:
+        wv = mw @ v.co
+        verts.append((wv.x * s, wv.y * s, wv.z * s))
+    tris = [tuple(t.vertices) for t in mesh.loop_triangles]
+    rgb = tuple(obj.color[:3])
+    color = rgb if any(abs(c - 1.0) > 1e-4 for c in rgb) else None
+    op = data["op"] if "op" in data.keys() else "ADD"
+    group = data["group"] if "group" in data.keys() else "AUTO"
+    return {"kind": "MESH_PATCH", "name": obj.name,
+            "params": {"verts": verts, "tris": tris},
+            "color": color, "op": op, "cut": "THROUGH", "group": group}
+
+
 def _feature_from_object(obj, user_scale):
     """Read an object's stored fit params and return an export feature dict.
 
@@ -1095,6 +1336,10 @@ def _feature_from_object(obj, user_scale):
     if data is None:
         return None
     kind = data["kind"]
+    if kind == "MESH_PATCH":
+        # The geometry is the object's own mesh; matrix_world already honours
+        # any later moves, so the _xform delta machinery is unnecessary.
+        return _mesh_patch_feature(obj, user_scale, data)
     schema = _PARAM_KINDS.get(kind)
     if schema is None:
         return None
@@ -1192,6 +1437,15 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
         description="Fuse all fitted solids into a single watertight body (OCCT only)",
         default=False,
     )
+    ordered_booleans: BoolProperty(
+        name="Booleans in stack order",
+        description=(
+            "Apply ADD/SUBTRACT in the feature-stack order, so an ADD placed "
+            "after a cut refills it (e.g. a boss inside a pocket). Off = legacy: "
+            "fuse every ADD first, then apply all cutters (OCCT only)"
+        ),
+        default=True,
+    )
     cutter_overshoot: FloatProperty(
         name="Cutter overshoot",
         description=(
@@ -1218,7 +1472,10 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
     )
     sew_tolerance: FloatProperty(
         name="Sew tolerance",
-        description="Max gap between faces that the watertight pass will stitch closed",
+        description=(
+            "Max gap between faces that the watertight pass will stitch closed, "
+            "in STEP output units (after scaling)"
+        ),
         default=0.01, min=0.0, max=100.0, precision=4,
     )
     unit: EnumProperty(
@@ -1227,9 +1484,25 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
         items=[("MM", "Millimeters", ""), ("M", "Meters", ""), ("IN", "Inches", "")],
         default="MM",
     )
+    scale_mode: EnumProperty(
+        name="Scale from",
+        description="How the Blender-unit → STEP-unit coordinate scale is chosen",
+        items=[
+            ("SCENE", "Scene units",
+             "Derive from the scene's unit settings (1 BU = Unit Scale meters) "
+             "and the STEP unit above. Scenes with unit system 'None' pass "
+             "coordinates through unchanged"),
+            ("MANUAL", "Manual",
+             "Use the Scale factor below"),
+        ],
+        default="SCENE",
+    )
     scale: FloatProperty(
         name="Scale",
-        description="Factor applied to all coordinates (e.g. 1000 to write metres as mm)",
+        description=(
+            "Factor applied to all coordinates (e.g. 1000 to write metres as mm). "
+            "Only used when Scale from is Manual"
+        ),
         default=1.0, min=1e-6, max=1e6,
     )
     use_selection: BoolProperty(
@@ -1243,6 +1516,7 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
         items=[
             ("ALL", "All", "Export every fitted primitive"),
             ("MANUAL", "Manual only", "Export only the hand-fit feature stack"),
+            ("BUILD", "Built only", "Export only the forward-built STEP primitives"),
             ("AUTO", "Auto only", "Export only the whole-mesh surface auto-decomposed set"),
             ("BOOL", "Solid only", "Export only the volumetric solid/boolean set"),
         ],
@@ -1265,27 +1539,125 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
         ),
         default=False,
     )
+    include_leftovers: BoolProperty(
+        name="Include leftover patches",
+        description=(
+            "Export 'Reverse_Leftover' mesh patches (faces no primitive explained) "
+            "as faceted planar faces so the STEP contains the complete part"
+        ),
+        default=True,
+    )
+    py_cutters: EnumProperty(
+        name="Cutters (pure Python)",
+        description=(
+            "The pure-Python writer has no boolean kernel, so SUBTRACT features "
+            "cannot be cut from the part. Choose what to write instead"
+        ),
+        items=[
+            ("MARK", "Include marked",
+             "Write cutters as red 'cutter:' reference solids so they are visibly "
+             "not part material"),
+            ("SKIP", "Skip",
+             "Omit subtractive features from the file entirely"),
+            ("SOLID", "Include as solids",
+             "Legacy: write cutters as plain additive solids (holes appear filled)"),
+        ],
+        default="MARK",
+    )
 
     @classmethod
     def poll(cls, context):
         return any("reverse" in o for o in context.scene.objects)
 
+    def _effective_scale(self, context):
+        if self.scale_mode == "MANUAL":
+            return self.scale
+        us = context.scene.unit_settings
+        return units.effective_scale(self.unit, system=us.system,
+                                     scale_length=us.scale_length)
+
+    def invoke(self, context, event):
+        # Default the STEP unit to the scene's display unit, unless the caller
+        # already chose one explicitly.
+        if not self.properties.is_property_set("unit"):
+            us = context.scene.unit_settings
+            self.unit = units.step_unit_for_scene(us.system, us.length_unit)
+        return super().invoke(context, event)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        layout.prop(self, "backend")
+        layout.prop(self, "py_cutters")
+
+        box = layout.box()
+        box.label(text="Booleans / healing (OCCT)")
+        box.prop(self, "merge_solids")
+        box.prop(self, "ordered_booleans")
+        box.prop(self, "cutter_overshoot")
+        box.prop(self, "auto_stitch")
+        box.prop(self, "make_watertight")
+        box.prop(self, "sew_tolerance")
+
+        layout.prop(self, "unit")
+        layout.prop(self, "scale_mode")
+        row = layout.row()
+        row.enabled = self.scale_mode == "MANUAL"
+        row.prop(self, "scale")
+        eff = self._effective_scale(context)
+        layout.label(text=f"Effective scale: 1 BU → {eff:g} {self.unit.lower()}")
+
+        layout.prop(self, "use_selection")
+        layout.prop(self, "group_filter")
+        layout.prop(self, "include_leftovers")
+        layout.prop(self, "write_pmi_sidecar")
+        layout.prop(self, "semantic_pmi")
+
     def execute(self, context):
+        # Script back-compat: an explicit scale= without a scale_mode= keeps its
+        # old meaning (a manual factor) rather than being silently ignored.
+        if (self.properties.is_property_set("scale")
+                and not self.properties.is_property_set("scale_mode")):
+            self.scale_mode = "MANUAL"
+        eff_scale = self._effective_scale(context)
+
         sources = context.selected_objects if self.use_selection else context.scene.objects
         features = []
+        drift_warnings = []
         for o in sources:
             if o.type == "MESH" and "reverse" in o:
                 if self.group_filter != "ALL":
                     grp = o["reverse"]["group"] if "group" in o["reverse"].keys() else "MANUAL"
                     if grp != self.group_filter:
                         continue
-                feat = _feature_from_object(o, self.scale)
+                feat = _feature_from_object(o, eff_scale)
                 if feat is not None:
                     features.append(feat)
+                    msg = forward.drift_status(o)
+                    if msg:
+                        drift_warnings.append(f"⚠ {o.name}: {msg}")
+        for msg in drift_warnings:
+            self.report({"WARNING"}, msg)
+
+        if not self.include_leftovers:
+            features = [f for f in features if f["kind"] != "MESH_PATCH"]
+        big = sum(len(f["params"]["tris"]) for f in features
+                  if f["kind"] == "MESH_PATCH")
+        if big > _MESH_PATCH_WARN:
+            self.report({"WARNING"},
+                        f"Leftover patches carry {big} triangles — the STEP will be "
+                        "large; consider remeshing or disabling 'Include leftover patches'")
 
         if not features:
             self.report({"WARNING"}, "No fitted (Reverse) objects found to export")
             return {"CANCELLED"}
+
+        # Order features by their position in the feature stack (the order the
+        # user arranged in the panel); objects not in the stack keep scene order.
+        rank = {f.object_name: i for i, f in enumerate(context.scene.reverse.features)}
+        features.sort(key=lambda f: rank.get(f["name"], len(rank)))
 
         name = os.path.splitext(os.path.basename(self.filepath))[0] or "Reverse"
 
@@ -1309,12 +1681,20 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
                                          overshoot=self.cutter_overshoot,
                                          watertight=self.make_watertight,
                                          sew_tol=self.sew_tolerance,
-                                         auto_stitch=self.auto_stitch)
-                context.scene.reverse.last_report = _format_report(info)
+                                         auto_stitch=self.auto_stitch,
+                                         ordered=self.ordered_booleans)
+                context.scene.reverse.last_report = "\n".join(
+                    drift_warnings + [_format_report(info)])
                 self.report({"INFO"}, f"Exported via OCCT: {info}")
                 return {"FINISHED"}
             except Exception as exc:
                 self.report({"WARNING"}, f"OCCT export failed ({exc}); using pure-Python")
+
+        n_cut = sum(1 for f in features if f.get("op") == "SUBTRACT")
+        if n_cut == len(features) and self.py_cutters == "SKIP":
+            self.report({"WARNING"},
+                        "All features are cutters and 'Cutters' is set to Skip — nothing to export")
+            return {"CANCELLED"}
 
         text = step_export.build_step(
             features,
@@ -1323,14 +1703,25 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
             timestamp=datetime.datetime.now().isoformat(timespec="seconds"),
             filename=os.path.basename(self.filepath),
             pmi=self.semantic_pmi,
+            cutter_mode=self.py_cutters,
         )
         with open(self.filepath, "w", encoding="ascii", errors="replace") as fp:
             fp.write(text)
 
-        context.scene.reverse.last_report = (
+        report_lines = list(drift_warnings)
+        if n_cut:
+            verb = {"SKIP": "skipped",
+                    "MARK": "written as red 'cutter:' reference solids",
+                    "SOLID": "written as plain solids (holes appear filled)"}[self.py_cutters]
+            msg = f"Pure-Python writer cannot subtract — {n_cut} cutter(s) {verb}"
+            self.report({"WARNING"}, msg)
+            report_lines.append(msg)
+        report_lines.append(
             "Validation (volumes / watertightness) requires the OCCT kernel.\n"
             "Install it from the panel to get a per-solid report.")
-        self.report({"INFO"}, f"Exported {len(features)} primitives → {os.path.basename(self.filepath)}")
+        context.scene.reverse.last_report = "\n".join(report_lines)
+        n_written = len(features) - (n_cut if self.py_cutters == "SKIP" else 0)
+        self.report({"INFO"}, f"Exported {n_written} primitives → {os.path.basename(self.filepath)}")
         return {"FINISHED"}
 
 
@@ -1431,6 +1822,10 @@ def _reconcile_features(_dummy):
 
 
 classes = (
+    REVERSE_OT_add_primitive,
+    REVERSE_OT_edit_params,
+    REVERSE_OT_rebuild_feature,
+    REVERSE_OT_bake_scale,
     REVERSE_OT_fit_selection,
     REVERSE_OT_auto_decompose,
     REVERSE_OT_clear_auto_set,

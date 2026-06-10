@@ -25,8 +25,75 @@ class REVERSE_UL_features(UIList):
             label = f"[A] {label}"           # whole-mesh surface auto-decompose set
         elif item.group == "BOOL":
             label = f"[S] {label}"           # whole-mesh solid/boolean set
+        elif item.group == "BUILD":
+            label = f"[B] {label}"           # forward-built STEP primitive
         row.label(text=label, icon=icon_for.get(item.kind, "DOT"))
-        row.label(text=f"RMS {item.rms:.3g}")
+        # Built primitives are exact by construction — an RMS would be noise.
+        row.label(text="exact" if item.group == "BUILD" else f"RMS {item.rms:.3g}")
+
+
+class REVERSE_PT_build(Panel):
+    """Forward modeling: drop STEP-primitive solids and edit them parametrically.
+
+    Everything created here carries the same param schema as fitted primitives,
+    so it shares the feature stack and is always STEP-exportable.
+    """
+
+    bl_label = "Build — STEP Primitives"
+    bl_idname = "REVERSE_PT_build"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Reverse"
+    bl_order = 0
+
+    def draw(self, context):
+        from . import forward
+        from .properties import build_params_synced
+
+        layout = self.layout
+        settings = context.scene.reverse
+
+        col = layout.column(align=True)
+        col.prop(settings, "build_primitive_type")
+        col.prop(settings, "default_operation", text="Role")
+        if settings.default_operation == "SUBTRACT":
+            col.prop(settings, "default_cut_mode", text="Cut")
+
+        icon_for = {"BOX": "MESH_CUBE", "CYLINDER": "MESH_CYLINDER",
+                    "CONE": "MESH_CONE", "SPHERE": "MESH_UVSPHERE",
+                    "TORUS": "MESH_TORUS"}
+        layout.operator("reverse.add_primitive", text="Add Primitive",
+                        icon=icon_for.get(settings.build_primitive_type, "PLUS"))
+
+        obj = context.active_object
+        data = obj.get("reverse") if obj else None
+        if data is None:
+            return
+        kind = data["kind"]
+        fields = forward.PARAM_FIELDS.get(kind)
+
+        box = layout.box()
+        box.label(text=f"{obj.name} · {kind.title()}", icon=icon_for.get(kind, "DOT"))
+        if fields:
+            if build_params_synced(obj):
+                col = box.column(align=True)
+                for key, label in fields:
+                    col.prop(obj.reverse_build, key, text=label)
+            else:
+                # draw() may not write properties, so syncing the editable
+                # fields from the stored params takes one click.
+                box.operator("reverse.edit_params", icon="OPTIONS")
+
+        drift = forward.drift_status(obj)
+        if drift:
+            warn = box.column(align=True)
+            warn.alert = True
+            warn.label(text="Out of sync with parameters:", icon="ERROR")
+            for line in drift.split(" — "):
+                warn.label(text=line)
+            box.operator("reverse.rebuild_feature", icon="FILE_REFRESH")
+        if obj.mode == "OBJECT" and any(abs(c - 1.0) > 1e-6 for c in obj.scale):
+            box.operator("reverse.bake_scale", icon="FULLSCREEN_EXIT")
 
 
 class REVERSE_PT_main(Panel):
@@ -35,6 +102,7 @@ class REVERSE_PT_main(Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "Reverse"
+    bl_order = 1
 
     def draw(self, context):
         layout = self.layout
@@ -101,6 +169,7 @@ class REVERSE_PT_main(Panel):
         sub.prop(settings, "decompose_min_coverage")
         row = box.row(align=True)
         row.prop(settings, "decompose_merge", toggle=True)
+        row.prop(settings, "decompose_keep_leftovers", toggle=True)
         adv = box.column(align=True)
         adv.label(text="Energy weights (advanced):")
         adv.prop(settings, "decompose_lambda")
@@ -234,7 +303,8 @@ class REVERSE_PT_report(Panel):
             box.label(text=line, icon=icon)
 
 
-classes = (REVERSE_UL_features, REVERSE_PT_main, REVERSE_PT_features, REVERSE_PT_report)
+classes = (REVERSE_UL_features, REVERSE_PT_build, REVERSE_PT_main,
+           REVERSE_PT_features, REVERSE_PT_report)
 
 
 def register():

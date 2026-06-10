@@ -216,6 +216,50 @@ def main():
     except OSError:
         pass
 
+    # Ordered booleans: an ADD plug placed *after* the cut refills part of the
+    # hole. Legacy mode fuses the plug into the base first, so the cutter removes
+    # it again — the two modes must give different volumes.
+    ordered_feats = [
+        {"kind": "BOX", "op": "ADD", "name": "base", "params": {
+            "center": (0, 0, 0), "ax": (1, 0, 0), "ay": (0, 1, 0), "az": (0, 0, 1),
+            "hx": 2.0, "hy": 2.0, "hz": 2.0}},                       # 4×4×4 = 64
+        {"kind": "CYLINDER", "op": "SUBTRACT", "name": "hole", "params": {
+            "base": (0, 0, 0), "axis": (0, 0, 1), "radius": 1.0, "height": 10.0}},
+        {"kind": "BOX", "op": "ADD", "name": "plug", "params": {     # 1×1×4 inside the bore
+            "center": (0, 0, 0), "ax": (1, 0, 0), "ay": (0, 1, 0), "az": (0, 0, 1),
+            "hx": 0.5, "hy": 0.5, "hz": 2.0}},
+    ]
+
+    def _volume(path):
+        rd = STEPControl_Reader(); rd.ReadFile(path); rd.TransferRoots()
+        pr = GProp_GProps()
+        BRepGProp.VolumeProperties_s(rd.OneShape(), pr)
+        return pr.Mass()
+
+    out_ord = os.path.join(os.path.dirname(__file__), "occ_ordered.step")
+    occ_export.export(ordered_feats, out_ord, unit="MM", ordered=True)
+    v_ord = _volume(out_ord)
+    expected_ord = 64.0 - math.pi * 4.0 + 4.0       # plug restored after the cut
+    occ_export.export(ordered_feats, out_ord, unit="MM", ordered=False)
+    v_leg = _volume(out_ord)
+    expected_leg = 64.0 - math.pi * 4.0             # plug fused first, then drilled away
+    print(f"[info] ordered: vol={v_ord:.3f} (expect {expected_ord:.3f}); "
+          f"legacy: vol={v_leg:.3f} (expect {expected_leg:.3f})")
+    if abs(v_ord - expected_ord) > 0.5:
+        fail(f"ordered booleans wrong volume ({v_ord:.3f} != {expected_ord:.3f})")
+    if abs(v_leg - expected_leg) > 0.5:
+        fail(f"legacy boolean order regressed ({v_leg:.3f} != {expected_leg:.3f})")
+    # An add-then-cut stack is identical in both modes — guard the shared cutter path.
+    occ_export.export(sub_feats, out_ord, unit="MM", ordered=True)
+    v_same = _volume(out_ord)
+    if abs(v_same - expected) > 0.5:
+        fail(f"ordered mode changed a plain subtract ({v_same:.3f} != {expected:.3f})")
+    print("[ok] ordered booleans: stack order honoured; legacy mode unchanged")
+    try:
+        os.remove(out_ord)
+    except OSError:
+        pass
+
     # Auto-stitch (#4): two boxes abutting at z=0 form a 2x2x4 bar. Fuse + unify
     # must give ONE solid with 6 faces (coplanar sides merged), not 10.
     two_boxes = [
@@ -278,6 +322,32 @@ def main():
     print("[ok] watertight: 6 loose planes → 1 closed box solid (volume 8)")
     try:
         os.remove(out6)
+    except OSError:
+        pass
+
+    # Leftover MESH_PATCH: replace one side of the box with a 2-triangle faceted
+    # patch — the watertight pass must sew it with the analytic planes into the
+    # same closed solid.
+    patch_side = {"kind": "MESH_PATCH", "op": "ADD", "name": "patch", "params": {
+        "verts": [(1, -1, -1), (1, 1, -1), (1, 1, 1), (1, -1, 1)],
+        "tris": [(0, 1, 2), (0, 2, 3)]}}
+    mixed = [patch_side] + box_planes[1:]
+    out7 = os.path.join(os.path.dirname(__file__), "occ_patch.step")
+    info7 = occ_export.export(mixed, out7, unit="MM", watertight=True, sew_tol=1e-6)
+    print("[info] patch watertight export:", info7)
+    r7 = STEPControl_Reader(); r7.ReadFile(out7); r7.TransferRoots(); sh7 = r7.OneShape()
+    n7 = 0
+    e7 = TopExp_Explorer(sh7, TopAbs_SOLID)
+    while e7.More():
+        n7 += 1
+        e7.Next()
+    pr7 = GProp_GProps(); BRepGProp.VolumeProperties_s(sh7, pr7); v7 = pr7.Mass()
+    print(f"[info] patched solid: solids={n7} volume={v7:.3f} (expected 8.0)")
+    if n7 != 1 or abs(v7 - 8.0) > 0.01:
+        fail(f"mesh patch did not sew into the box (solids={n7}, vol={v7:.3f})")
+    print("[ok] MESH_PATCH: faceted side sewn with analytic planes → closed solid")
+    try:
+        os.remove(out7)
     except OSError:
         pass
 

@@ -12,6 +12,8 @@ A *feature* handed to :func:`build_step` is a dict with keys:
     params : the kind's analytic parameters, in the target unit, world space
     name   : display name for the solid
     color  : optional (r, g, b) in 0..1
+    op     : optional 'ADD' | 'SUBTRACT' — this writer has no boolean kernel, so
+             SUBTRACT features are handled per ``cutter_mode`` (see build_step)
 
 All vectors/points are plain tuples or lists of three floats.
 """
@@ -29,7 +31,12 @@ DEFAULT_COLORS = {
     "CONE": (0.85, 0.55, 0.30),
     "SPHERE": (0.50, 0.80, 0.40),
     "TORUS": (0.80, 0.40, 0.62),
+    "MESH_PATCH": (0.75, 0.72, 0.55),
 }
+
+# Colour forced onto SUBTRACT features in cutter_mode='MARK' so they read as
+# reference geometry, not part material.
+CUTTER_COLOR = (0.85, 0.25, 0.25)
 
 _EPS = 1e-9
 
@@ -169,6 +176,7 @@ def _solid_name(base, p):
     """
     spec = p.get("thread_spec")
     name = f"{base} thread {spec}" if spec else base
+    name = p.get("name_prefix", "") + name
     return name.replace("'", "''")
 
 
@@ -355,7 +363,8 @@ def _sphere_item(w, p):
     e_mer = w.edge_curve(south, north, meridian, True)
     loop = w.edge_loop([w.oriented_edge(e_mer, True), w.oriented_edge(e_mer, False)])
     face = w.advanced_face("sphere", [w.face_outer_bound(loop, True)], surf, True)
-    return w.add(f"MANIFOLD_SOLID_BREP('sphere',{w.closed_shell([face])})"), True
+    return w.add(f"MANIFOLD_SOLID_BREP('{_solid_name('sphere', p)}',"
+                 f"{w.closed_shell([face])})"), True
 
 
 def _torus_item(w, p):
@@ -382,7 +391,8 @@ def _torus_item(w, p):
         w.oriented_edge(e_major, False),
     ])
     face = w.advanced_face("torus", [w.face_outer_bound(loop, True)], surf, True)
-    return w.add(f"MANIFOLD_SOLID_BREP('torus',{w.closed_shell([face])})"), True
+    return w.add(f"MANIFOLD_SOLID_BREP('{_solid_name('torus', p)}',"
+                 f"{w.closed_shell([face])})"), True
 
 
 def _box_item(w, p):
@@ -444,7 +454,47 @@ def _box_item(w, p):
         face([(i, j, 0) for i in (0, 1) for j in (0, 1)], _scale(az, -1)),
         face([(i, j, 1) for i in (0, 1) for j in (0, 1)], az),
     ]
-    return w.add(f"MANIFOLD_SOLID_BREP('box',{w.closed_shell(faces)})"), True
+    return w.add(f"MANIFOLD_SOLID_BREP('{_solid_name('box', p)}',"
+                 f"{w.closed_shell(faces)})"), True
+
+
+def _mesh_patch_item(w, p):
+    """Leftover mesh region → faceted planar triangles in a surface model.
+
+    ``params`` carry ``verts`` (world points) and ``tris`` (vertex-index triples).
+    Each triangle becomes its own ADVANCED_FACE on a PLANE; edges are not shared
+    between triangles, which a SHELL_BASED_SURFACE_MODEL permits. Degenerate
+    (zero-area) triangles are skipped.
+    """
+    verts = [tuple(float(c) for c in v) for v in p["verts"]]
+    vertex_ids = {}
+
+    def vid(i):
+        if i not in vertex_ids:
+            vertex_ids[i] = w.vertex(verts[i])
+        return vertex_ids[i]
+
+    faces = []
+    for tri in p["tris"]:
+        ia, ib, ic = (int(i) for i in tri)
+        a, b, c = verts[ia], verts[ib], verts[ic]
+        n = _cross(_sub(b, a), _sub(c, a))
+        if _norm(n) < _EPS:
+            continue
+        oeds = []
+        for i0, i1 in ((ia, ib), (ib, ic), (ic, ia)):
+            p0, p1 = verts[i0], verts[i1]
+            ln = w.line(p0, _unit(_sub(p1, p0)))
+            ec = w.edge_curve(vid(i0), vid(i1), ln, True)
+            oeds.append(w.oriented_edge(ec, True))
+        bound = w.face_outer_bound(w.edge_loop(oeds), True)
+        centroid = _scale(_add(_add(a, b), c), 1.0 / 3.0)
+        surf = w.add(f"PLANE('',{w.axis2(centroid, _unit(n), _unit(_sub(b, a)))})")
+        faces.append(w.advanced_face("leftover", [bound], surf, True))
+    if not faces:
+        return None, False
+    shell = w.open_shell(faces)
+    return w.add(f"SHELL_BASED_SURFACE_MODEL('',({shell}))"), False
 
 
 _BUILDERS = {
@@ -455,19 +505,27 @@ _BUILDERS = {
     "SPHERE": _sphere_item,
     "TORUS": _torus_item,
     "FILLET": _fillet_item,
+    "MESH_PATCH": _mesh_patch_item,
 }
 
 
 # --- top-level assembly + product structure -----------------------------------
 
 def build_step(features, *, unit="MM", product_name="Reverse",
-               author="", organization="", timestamp="", filename="", pmi=False):
+               author="", organization="", timestamp="", filename="", pmi=False,
+               cutter_mode="SOLID"):
     """Return the full STEP file text for ``features``.
 
     ``unit`` is one of 'MM', 'M', 'IN' (controls only the declared SI unit/prefix;
     coordinates are written as given). Items are assembled into one shape
     representation with colour styling. With ``pmi=True`` each feature-of-size also
     gets a semantic AP242 dimension (DIMENSIONAL_SIZE) carrying its nominal value.
+
+    This writer has no boolean kernel, so features with op='SUBTRACT' cannot be
+    cut from the part. ``cutter_mode`` picks what to do with them instead:
+      'SOLID' — write them as plain additive solids (legacy behaviour)
+      'MARK'  — write them, but red and named 'cutter:…' so they read as reference
+      'SKIP'  — omit them entirely
     """
     w = StepWriter()
 
@@ -478,9 +536,18 @@ def build_step(features, *, unit="MM", product_name="Reverse",
         builder = _BUILDERS.get(kind)
         if builder is None:
             continue
-        item_id, is_solid = builder(w, feat["params"])
-        items.append((item_id, is_solid))
+        is_cutter = feat.get("op") == "SUBTRACT"
+        if is_cutter and cutter_mode == "SKIP":
+            continue
+        params = feat["params"]
         color = feat.get("color") or DEFAULT_COLORS.get(kind, (0.7, 0.7, 0.7))
+        if is_cutter and cutter_mode == "MARK":
+            params = dict(params, name_prefix="cutter:")
+            color = CUTTER_COLOR
+        item_id, is_solid = builder(w, params)
+        if item_id is None:                       # e.g. an all-degenerate mesh patch
+            continue
+        items.append((item_id, is_solid))
         styled.append(_style(w, item_id, color))
 
     # Geometric context with units + uncertainty.

@@ -119,3 +119,33 @@
 - **Root cause:** A flat surface is the limit of a sphere as radius→∞; the algebraic fit happily returns that giant sphere, and nothing distinguished it from a real one. fit_auto's Occam tie-break only prefers the plane when it is "essentially exact" (rel_rms < 1e-3); for a moderately curved patch the plane is not exact, so the lower-RMS giant sphere won.
 - **Fix applied:** Reject a curved primitive whose characteristic radius exceeds `DEGENERATE_RADIUS_RATIO` (20) × the region's own scale, and fall back to fitting a plane for that patch. Genuine spheres/cylinders (radius on the order of the region) and large features captured by a coarse-scale candidate still pass.
 - **Prevention rule:** When fitting an unbounded-radius primitive, gate on a physical-plausibility bound (radius not vastly larger than the data it was fit to), not on residual alone. Treat "radius ≫ region size" as a flat patch and represent it as a plane.
+
+### STEP export scale ignored Blender scene units — silent ×1000 size error — 2026-06-10
+
+- **Severity:** High
+- **Category:** Logic
+- **File(s):** `reverse_mesh/operators.py`, `reverse_mesh/units.py`
+- **Pattern:** Writing world-space coordinates into a file that declares a physical unit (STEP `unit="MM"`) while leaving the coordinate scale at a constant default (`scale=1.0`), never consulting `scene.unit_settings`. In Blender's default metric scene 1 BU = 1 m, so every export was declared in mm but written in metres — a 50 mm part arrived in CAD as 0.05 mm. Invisible in tests because tests only checked headers/topology, never absolute dimensions.
+- **Root cause:** The exporter treated unit choice as cosmetic metadata ("controls only the declared SI prefix; coordinates are written as given") and left unit correctness entirely to the user.
+- **Fix applied:** New bpy-free `units.effective_scale()` derives BU→STEP-unit scale from `scene.unit_settings` (`scale_length`, `system`); the operator defaults to scene-derived scale, defaults the STEP unit from the scene display unit on invoke, keeps a Manual override, and shows the effective scale in the export dialog.
+- **Prevention rule:** Any exporter that declares a physical unit must compute the coordinate scale from the scene's unit settings (or refuse/warn), and a test must assert an absolute dimension in the output file, not just structure.
+
+### Pure-Python STEP writer wrote SUBTRACT cutters as additive solids — 2026-06-10
+
+- **Severity:** High
+- **Category:** Logic
+- **File(s):** `reverse_mesh/step_export.py`, `reverse_mesh/operators.py`
+- **Pattern:** A consumer (the pure-Python writer) silently ignoring a semantic field it cannot honour (`feature["op"]`). Lacking a boolean kernel, it wrote SUBTRACT features as ordinary solids, so a hole cutter became material filling the hole — geometrically wrong output with no warning anywhere.
+- **Root cause:** The `op` field was added for the OCCT backend; the pure-Python writer's feature loop predates it and was never taught to even acknowledge the role.
+- **Fix applied:** `build_step` gained `cutter_mode` (SOLID legacy / MARK red `cutter:` reference solids / SKIP); the export operator defaults to MARK on the pure-Python path and reports a warning whenever cutters cannot be subtracted.
+- **Prevention rule:** When a schema field changes meaning of the geometry (boolean role, cut mode), every writer/consumer must either honour it or explicitly surface that it cannot — grep all consumers of the feature dict when adding such a field.
+
+### Stale lazy matrix_world read after setting obj.scale — 2026-06-11
+
+- **Severity:** Medium
+- **Category:** API Misuse
+- **File(s):** `reverse_mesh/operators.py` (REVERSE_OT_bake_scale), `reverse_mesh/forward.py`
+- **Pattern:** Writing a transform channel (`obj.scale = ...`) and then, in the same execution, reading `obj.matrix_world` expecting it to reflect the write. Blender evaluates `matrix_world` lazily via the depsgraph, so the read returns the pre-write matrix; any math built on it (here, the `_xform`→`matrix_world` delta used to re-anchor a rebuilt primitive) silently bakes the old transform back in.
+- **Root cause:** Treated `matrix_world` as a plain derived attribute rather than a depsgraph-evaluated one; the bake-scale operator cleared the scale and immediately rebuilt, so the rebuild's delta still contained the old scale and re-applied it.
+- **Fix applied:** Call `context.view_layer.update()` between the scale write and the rebuild so `matrix_world` is current when the delta is computed; the integration test asserts the scale is actually 1 after baking.
+- **Prevention rule:** After mutating `location`/`rotation`/`scale` (or parenting), never read `matrix_world` in the same operator without an intervening `view_layer.update()` (or compose the matrix yourself); add a test asserting the post-condition on the evaluated transform.

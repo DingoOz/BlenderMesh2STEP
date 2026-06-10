@@ -16,7 +16,7 @@ from __future__ import annotations
 import importlib
 import math
 
-from .step_export import _add, _cross, _perp, _scale, _sub, _unit  # geometry helpers
+from .step_export import _add, _cross, _norm, _perp, _scale, _sub, _unit  # geometry helpers
 
 
 def is_available() -> bool:
@@ -108,7 +108,7 @@ def _grow_cutter(kind, p, frac, ends="BOTH"):
     For cylinders, ``"LOW"`` is the −axis end and ``"HIGH"`` the +axis end. For
     cones, ``"LOW"`` is the r1 (base) end and ``"HIGH"`` the r2 end.
     """
-    if frac <= 0 or ends == "NONE":
+    if frac <= 0 or ends == "NONE" or "axis" not in p:
         return p
     grow_low = ends in ("BOTH", "LOW")
     grow_high = ends in ("BOTH", "HIGH")
@@ -243,7 +243,7 @@ def _make_watertight(shape, tol):
 
 
 def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
-           watertight=False, sew_tol=0.01, auto_stitch=False):
+           watertight=False, sew_tol=0.01, auto_stitch=False, ordered=False):
     """Build OCCT solids from ``features`` and write an AP242 STEP file.
 
     Returns a short status string. If ``merge`` is set, all solids are fused into
@@ -251,6 +251,10 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
     cylinders/cones are extended by ``overshoot`` (fraction per end) so their ends
     cut cleanly through coplanar faces. ``auto_stitch`` fuses the additive solids
     and unifies their coincident faces into shared topology (best-effort).
+
+    With ``ordered=True`` booleans are applied in the order the features arrive
+    (the feature-stack order), so an ADD after a SUBTRACT refills part of the cut.
+    The legacy default fuses every ADD first and then applies all cutters.
     """
     (gp_Pnt, gp_Dir, gp_Ax2, gp_Ax3, gp_Pln) = _imp(
         "gp", "gp_Pnt", "gp_Dir", "gp_Ax2", "gp_Ax3", "gp_Pln")
@@ -306,46 +310,69 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
                       gp_Dir(*[float(c) for c in xdir]))
 
     # Separate the features by role; cutters are built later (they may need the
-    # finished base solid to decide which end of a blind hole is open).
-    adds, faces, cutters = [], [], []
+    # finished base solid to decide which end of a blind hole is open). ``seq``
+    # keeps the arrival order of the solid features for ordered booleans.
+    adds, faces, cutters, seq = [], [], [], []
     for feat in features:
         kind = feat["kind"]
         op = feat.get("op", "ADD")
         if op == "SUBTRACT":
             cutters.append(feat)
+            seq.append(("SUBTRACT", feat))
             continue
         shape, is_solid = build(kind, feat["params"])
         if shape is None:
             continue
-        (adds if is_solid else faces).append(shape)
+        if is_solid:
+            adds.append(shape)
+            seq.append(("ADD", shape))
+        else:
+            faces.append(shape)
 
     if not adds and not cutters and not faces:
         raise ValueError("No exportable shapes")
 
+    def apply_cutter(base, feat):
+        """Cut one SUBTRACT feature (plus preset recesses) from ``base``."""
+        kind, p = feat["kind"], feat["params"]
+        if feat.get("cut", "THROUGH") == "BLIND":
+            ends = blind_open_end(base, kind, p)   # overshoot only the open end
+        else:
+            ends = "BOTH"                          # through-hole
+        cutter, _ok = build(kind, _grow_cutter(kind, p, overshoot, ends))
+        if cutter is None:
+            return base, False
+        base = Cut(base, cutter).Shape()
+        # Counterbore / countersink: subtract the extra recess at the open end.
+        for sk, sp, sgrow_ends in _expand_preset(p):
+            sub_shape, _ = build(sk, _grow_cutter(sk, sp, overshoot, sgrow_ends))
+            if sub_shape is not None:
+                base = Cut(base, sub_shape).Shape()
+        return base, True
+
     do_bool = merge or auto_stitch or bool(cutters)
     parts = list(faces)
     note = ""
+    skipped = []
     if do_bool and adds:
-        base = adds[0]
-        for s in adds[1:]:
-            base = Fuse(base, s).Shape()
         n_cut = 0
-        for feat in cutters:
-            kind, p = feat["kind"], feat["params"]
-            if feat.get("cut", "THROUGH") == "BLIND":
-                ends = blind_open_end(base, kind, p)   # overshoot only the open end
-            else:
-                ends = "BOTH"                          # through-hole
-            cutter, ok = build(kind, _grow_cutter(kind, p, overshoot, ends))
-            if cutter is None:
-                continue
-            base = Cut(base, cutter).Shape()
-            n_cut += 1
-            # Counterbore / countersink: subtract the extra recess at the open end.
-            for sk, sp, sgrow_ends in _expand_preset(p):
-                sub_shape, _ = build(sk, _grow_cutter(sk, sp, overshoot, sgrow_ends))
-                if sub_shape is not None:
-                    base = Cut(base, sub_shape).Shape()
+        if ordered:
+            base = None
+            for op, item in seq:
+                if op == "ADD":
+                    base = item if base is None else Fuse(base, item).Shape()
+                elif base is None:
+                    skipped.append(item.get("name", "?"))
+                else:
+                    base, ok = apply_cutter(base, item)
+                    n_cut += 1 if ok else 0
+        else:
+            base = adds[0]
+            for s in adds[1:]:
+                base = Fuse(base, s).Shape()
+            for feat in cutters:
+                base, ok = apply_cutter(base, feat)
+                n_cut += 1 if ok else 0
         if auto_stitch:
             try:
                 base = _unify(base)
@@ -356,6 +383,9 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
             note_stitch = ""
         parts.append(base)
         note = f"1 body (+{len(adds)} / -{n_cut}){note_stitch}"
+        if skipped:
+            note += (f" — {len(skipped)} cutter(s) before any base solid skipped: "
+                     + ", ".join(skipped))
     else:
         # No base to cut from: export everything separately (overshoot is moot).
         for feat in cutters:
@@ -445,6 +475,27 @@ def _make_shape(kind, p, gp_Pnt, gp_Dir, gp_Ax3, gp_Pln,
         pln = gp_Pln(gp_Ax3(gp_Pnt(*c), gp_Dir(*n), gp_Dir(*e1)))
         face = MakeFace(pln, -p["half_u"], p["half_u"], -p["half_v"], p["half_v"]).Face()
         return face, False
+    if kind == "MESH_PATCH":
+        # Leftover mesh region: one planar face per triangle, in a compound. The
+        # watertight pass sews these together with the analytic faces.
+        (MakePolygon,) = _imp("BRepBuilderAPI", "BRepBuilderAPI_MakePolygon")
+        (BRep_Builder,) = _imp("BRep", "BRep_Builder")
+        (TopoDS_Compound,) = _imp("TopoDS", "TopoDS_Compound")
+        builder = BRep_Builder()
+        comp = TopoDS_Compound()
+        builder.MakeCompound(comp)
+        verts = [tuple(float(c) for c in v) for v in p["verts"]]
+        n_faces = 0
+        for tri in p["tris"]:
+            a, b, c = (verts[int(i)] for i in tri)
+            if _norm(_cross(_sub(b, a), _sub(c, a))) < 1e-12:
+                continue                          # degenerate sliver
+            poly = MakePolygon(gp_Pnt(*a), gp_Pnt(*b), gp_Pnt(*c), True)
+            builder.Add(comp, MakeFace(poly.Wire()).Face())
+            n_faces += 1
+        if n_faces == 0:
+            return None, False
+        return comp, False
     if kind == "FILLET":
         # Trimmed cylindrical patch: u = arc angle [u_min, u_max], v = axial extent.
         (Geom_CylindricalSurface,) = _imp("Geom", "Geom_CylindricalSurface")

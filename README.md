@@ -91,6 +91,28 @@ That's the semi-automatic, human-in-the-loop model proven by the
 [Reverse](https://github.com/nico-schluter/Reverse) Fusion 360 add-in — robust,
 because *you* supply the one thing a mesh can't: intent.
 
+## Build with STEP primitives (forward modeling)
+
+You don't have to start from a mesh. The **Build — STEP Primitives** panel adds
+solids (box, cylinder, cone, sphere, torus) that are STEP-exportable *by
+construction* — the exact analytic parameters live on the object, the viewport
+mesh is just a preview.
+
+1. In the **Reverse** tab, open **Build — STEP Primitives**, pick a primitive
+   and a **Role** (*Add* / *Subtract*), then **Add Primitive** — it lands at the
+   3D cursor and joins the same feature stack (tagged `[B]`).
+2. With the object selected, edit its dimensions live in the panel — the mesh
+   regenerates and the stored parameters stay exact. Move/rotate freely;
+   uniform scale can be baked into the dimensions with one click.
+3. Mix freely with reverse-fit features (e.g. a built cylinder as a *Subtract*
+   hole through a fitted plate) and **Export STEP** as usual.
+
+Guard rails instead of locks: if you edit the mesh in Edit Mode or apply a
+non-uniform scale to a curved primitive, the panel and the export report flag
+the drift — **Rebuild from Parameters** snaps the mesh back to the analytic
+truth. (Note: undoing a dimension edit restores the number but not the mesh
+until the next change — Rebuild fixes that too.)
+
 ## Two ways to export — both real STEP
 
 **Pure Python (built in, zero dependencies).** Writes genuine analytic surfaces
@@ -140,7 +162,9 @@ blender --command extension build --source-dir reverse_mesh --output-dir dist
 ```bash
 python3 reverse_mesh/tests/test_fitting.py     # fitting core (no Blender)
 python3 reverse_mesh/tests/test_step.py        # STEP writer (no Blender)
+python3 reverse_mesh/tests/test_forward_params.py  # forward-build schemas (no Blender)
 blender --background --python reverse_mesh/tests/blender_smoke.py     # integration
+blender --background --python reverse_mesh/tests/test_forward.py      # forward building
 blender --background --python reverse_mesh/tests/test_occ_export.py   # OCCT kernel (if installed)
 ```
 

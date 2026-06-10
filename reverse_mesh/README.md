@@ -31,6 +31,24 @@ typically to machine precision on clean, Blender-authored meshes.
      for a future STEP export.
 6. Repeat per feature. The **Fitted Features** list tracks the session.
 
+### Forward building (Build — STEP Primitives)
+
+The **Build — STEP Primitives** panel is the inverse workflow: instead of
+fitting primitives to a mesh, it creates them from typed dimensions. Built
+objects carry the same `["reverse"]` param schema (group `"BUILD"`, shown as
+`[B]` in the list), so roles, cut modes, hole presets, reordering and both STEP
+export backends work identically — and the export is exact by construction.
+
+- **Add Primitive** drops a box / cylinder / cone / sphere / torus at the 3D
+  cursor with the current Role; tweak creation dimensions in the F9 redo panel.
+- Selecting a built (or fitted) primitive shows its dimensions as live fields;
+  edits regenerate the preview mesh and the stored parameters together. For an
+  object whose fields aren't loaded yet, click **Edit Parameters** once.
+- Drift guard: mesh edits or non-uniform scale on curved kinds are flagged in
+  the panel and in the export report; **Rebuild from Parameters** restores the
+  mesh from the stored values, and **Bake Scale into Parameters** folds a
+  uniform object scale into the dimensions.
+
 ### Segmentation
 
 A single primitive fit to a multi-surface selection is ambiguous — e.g. a cube's
