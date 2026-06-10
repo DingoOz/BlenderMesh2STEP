@@ -16,7 +16,7 @@ from bpy.types import Operator
 from bpy_extras.io_utils import ExportHelper
 from mathutils import Matrix, Vector
 
-from . import build, occ_export, overlay, pmi_export, step_export
+from . import build, occ_export, overlay, pmi_export, step_export, units
 from .fitting import (
     FITTERS, MeshGraph, Region, classify_arrangement, fit_auto, fit_fillet,
     fit_robust, match_cylinders, optimize_decomposition, signed_distances,
@@ -1218,7 +1218,10 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
     )
     sew_tolerance: FloatProperty(
         name="Sew tolerance",
-        description="Max gap between faces that the watertight pass will stitch closed",
+        description=(
+            "Max gap between faces that the watertight pass will stitch closed, "
+            "in STEP output units (after scaling)"
+        ),
         default=0.01, min=0.0, max=100.0, precision=4,
     )
     unit: EnumProperty(
@@ -1227,9 +1230,25 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
         items=[("MM", "Millimeters", ""), ("M", "Meters", ""), ("IN", "Inches", "")],
         default="MM",
     )
+    scale_mode: EnumProperty(
+        name="Scale from",
+        description="How the Blender-unit → STEP-unit coordinate scale is chosen",
+        items=[
+            ("SCENE", "Scene units",
+             "Derive from the scene's unit settings (1 BU = Unit Scale meters) "
+             "and the STEP unit above. Scenes with unit system 'None' pass "
+             "coordinates through unchanged"),
+            ("MANUAL", "Manual",
+             "Use the Scale factor below"),
+        ],
+        default="SCENE",
+    )
     scale: FloatProperty(
         name="Scale",
-        description="Factor applied to all coordinates (e.g. 1000 to write metres as mm)",
+        description=(
+            "Factor applied to all coordinates (e.g. 1000 to write metres as mm). "
+            "Only used when Scale from is Manual"
+        ),
         default=1.0, min=1e-6, max=1e6,
     )
     use_selection: BoolProperty(
@@ -1287,7 +1306,58 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
     def poll(cls, context):
         return any("reverse" in o for o in context.scene.objects)
 
+    def _effective_scale(self, context):
+        if self.scale_mode == "MANUAL":
+            return self.scale
+        us = context.scene.unit_settings
+        return units.effective_scale(self.unit, system=us.system,
+                                     scale_length=us.scale_length)
+
+    def invoke(self, context, event):
+        # Default the STEP unit to the scene's display unit, unless the caller
+        # already chose one explicitly.
+        if not self.properties.is_property_set("unit"):
+            us = context.scene.unit_settings
+            self.unit = units.step_unit_for_scene(us.system, us.length_unit)
+        return super().invoke(context, event)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        layout.prop(self, "backend")
+        layout.prop(self, "py_cutters")
+
+        box = layout.box()
+        box.label(text="Booleans / healing (OCCT)")
+        box.prop(self, "merge_solids")
+        box.prop(self, "cutter_overshoot")
+        box.prop(self, "auto_stitch")
+        box.prop(self, "make_watertight")
+        box.prop(self, "sew_tolerance")
+
+        layout.prop(self, "unit")
+        layout.prop(self, "scale_mode")
+        row = layout.row()
+        row.enabled = self.scale_mode == "MANUAL"
+        row.prop(self, "scale")
+        eff = self._effective_scale(context)
+        layout.label(text=f"Effective scale: 1 BU → {eff:g} {self.unit.lower()}")
+
+        layout.prop(self, "use_selection")
+        layout.prop(self, "group_filter")
+        layout.prop(self, "write_pmi_sidecar")
+        layout.prop(self, "semantic_pmi")
+
     def execute(self, context):
+        # Script back-compat: an explicit scale= without a scale_mode= keeps its
+        # old meaning (a manual factor) rather than being silently ignored.
+        if (self.properties.is_property_set("scale")
+                and not self.properties.is_property_set("scale_mode")):
+            self.scale_mode = "MANUAL"
+        eff_scale = self._effective_scale(context)
+
         sources = context.selected_objects if self.use_selection else context.scene.objects
         features = []
         for o in sources:
@@ -1296,7 +1366,7 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
                     grp = o["reverse"]["group"] if "group" in o["reverse"].keys() else "MANUAL"
                     if grp != self.group_filter:
                         continue
-                feat = _feature_from_object(o, self.scale)
+                feat = _feature_from_object(o, eff_scale)
                 if feat is not None:
                     features.append(feat)
 

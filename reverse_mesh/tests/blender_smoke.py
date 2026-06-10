@@ -346,6 +346,41 @@ def main():
         fail("STEP file missing AP242 header")
     print(f"[ok] exported STEP for {n_reverse} Reverse objects → {os.path.basename(out)}")
 
+    # Unit-aware scale: a mm-scale scene exports 1 BU = 1 mm, the default metric
+    # scene (1 BU = 1 m) exports 1 BU = 1000 mm, and an explicit manual scale
+    # keeps the legacy pass-through meaning.
+    import re as _re
+
+    def _max_cyl_radius(path):
+        with open(path) as f:
+            radii = [float(m.group(1)) for m in
+                     _re.finditer(r"CYLINDRICAL_SURFACE\('',#\d+,([\d.Ee+-]+)\)", f.read())]
+        if not radii:
+            fail(f"no CYLINDRICAL_SURFACE in {os.path.basename(path)}")
+        return max(radii)
+
+    us = bpy.context.scene.unit_settings
+    out_units = os.path.join(os.path.dirname(__file__), "smoke_units.step")
+    us.scale_length = 0.001                       # mm-scale scene
+    if bpy.ops.reverse.export_step(filepath=out_units, unit="MM") != {"FINISHED"}:
+        fail("unit-scale STEP export failed (mm scene)")
+    r_mm = _max_cyl_radius(out_units)
+    if abs(r_mm - 2.0) > 1e-3:
+        fail(f"mm scene: expected the r=2 BU cylinder as 2 mm, got {r_mm}")
+    us.scale_length = 1.0                         # default metric scene: 1 BU = 1 m
+    if bpy.ops.reverse.export_step(filepath=out_units, unit="MM") != {"FINISHED"}:
+        fail("unit-scale STEP export failed (metric scene)")
+    r_m = _max_cyl_radius(out_units)
+    if abs(r_m - 2000.0) > 1.0:
+        fail(f"metric scene: expected radius 2000 mm, got {r_m}")
+    if bpy.ops.reverse.export_step(filepath=out_units, unit="MM",
+                                   scale=1.0) != {"FINISHED"}:
+        fail("manual-scale STEP export failed")
+    r_manual = _max_cyl_radius(out_units)
+    if abs(r_manual - 2.0) > 1e-3:
+        fail(f"manual scale=1: expected pass-through radius 2, got {r_manual}")
+    print("[ok] unit-aware export scale (scene mm / scene m / manual)")
+
     # Whole-mesh auto-decompose (global-optimization path). A subdivided cube must
     # come back as 6 planes in a SEPARATE 'Reverse Auto' collection, tagged AUTO,
     # exportable on its own. (Called as execute() — modal doesn't pump headless.)

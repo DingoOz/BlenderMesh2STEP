@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pmi_export  # noqa: E402
 import step_export as se  # noqa: E402
+import units  # noqa: E402
 
 
 def _features():
@@ -169,6 +170,26 @@ def main():
     check("cutter MARK forces red colour",
           f"COLOUR_RGB('',{se._num(r)},{se._num(g)},{se._num(b)})" in marked)
     check("cutter MARK leaves the body name alone", "'cutter:box'" not in marked)
+
+    # Unit-aware export scale (scene units → STEP units).
+    check("units: metric default scene → mm",
+          abs(units.effective_scale("MM", system="METRIC", scale_length=1.0) - 1000.0) < 1e-9)
+    check("units: mm-scale scene → mm passthrough",
+          abs(units.effective_scale("MM", system="METRIC", scale_length=0.001) - 1.0) < 1e-9)
+    check("units: metric scene → meters",
+          abs(units.effective_scale("M", system="METRIC", scale_length=1.0) - 1.0) < 1e-9)
+    check("units: inch-scale scene → inches",
+          abs(units.effective_scale("IN", system="IMPERIAL", scale_length=0.0254) - 1.0) < 1e-9)
+    check("units: unitless scene passes through",
+          units.effective_scale("MM", system="NONE", scale_length=123.0) == 1.0)
+    check("units: imperial scene defaults to IN",
+          units.step_unit_for_scene("IMPERIAL", "INCHES") == "IN")
+    check("units: meters display defaults to M",
+          units.step_unit_for_scene("METRIC", "METERS") == "M")
+    check("units: millimeter display defaults to MM",
+          units.step_unit_for_scene("METRIC", "MILLIMETERS") == "MM")
+    check("units: unitless scene defaults to MM",
+          units.step_unit_for_scene("NONE", "") == "MM")
 
     print(f"\n{'ALL STEP CHECKS PASSED' if ok else 'STEP CHECKS FAILED'}")
     sys.exit(0 if ok else 1)
