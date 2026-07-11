@@ -502,7 +502,7 @@ def main():
         "radius": rb, "height": 4.0, "u_min": 0.0, "u_max": math.pi / 2}}
     out_bl = os.path.join(os.path.dirname(__file__), "occ_blend.step")
     info_bl = occ_export.export([blend_box, blend_fil], out_bl, unit="MM",
-                                blend_fillets=True)
+                                merge=True, blend_fillets=True)
     vol_bl = 64.0 - (rb * rb - math.pi * rb * rb / 4.0) * 4.0
     if "1 fillet blend(s)" not in str(info_bl):
         fail(f"fillet blend not applied: {info_bl}")
@@ -515,7 +515,7 @@ def main():
         "base": (30.0, 30.0, 0.0), "axis": (0, 0, 1), "ref": (1, 0, 0),
         "radius": rb, "height": 4.0, "u_min": 0.0, "u_max": math.pi / 2}}
     info_um = occ_export.export([blend_box, far_fil], out_bl, unit="MM",
-                                blend_fillets=True)
+                                merge=True, blend_fillets=True)
     if "unmatched" not in str(info_um):
         fail(f"unmatched fillet should fall back to a patch: {info_um}")
     if not info_um.solids or abs(info_um.solids[0]["volume"] - 64.0) > 1e-6:

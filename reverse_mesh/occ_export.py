@@ -273,7 +273,10 @@ def _apply_fillet_blends(base, fillet_feats):
         while e.More():
             edge = TopoDS.Edge_s(e.Current())
             pts = edge_endpoints(edge)
-            if len(pts) == 2:
+            # Closed edges (a circle's seam vertex appears twice) and
+            # degenerate slivers are never the sharp edge of a blend — and
+            # feeding them to MakeFillet can crash the kernel outright.
+            if len(pts) == 2 and _norm(_sub(pts[0], pts[1])) > 1e-6 * r:
                 d0, a0 = line_distance(pts[0], corner, axis)
                 d1, a1 = line_distance(pts[1], corner, axis)
                 # Both endpoints on the predicted line, overlapping the
@@ -479,7 +482,10 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
                 base = Cut(base, sub_shape).Shape()
         return base, True
 
-    do_bool = merge or auto_stitch or bool(cutters) or bool(fillet_feats)
+    # Note: fillet blends only apply when the booleans path already produces a
+    # single base body (merge / cutters / stitch) — a fillet alone must not
+    # force fusing otherwise-separate solids.
+    do_bool = merge or auto_stitch or bool(cutters)
     parts = list(faces)
     note = ""
     skipped = []

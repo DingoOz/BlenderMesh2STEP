@@ -1497,7 +1497,8 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
         description=(
             "Apply recognized edge fillets as true rounds on the solid "
             "(BRepFilletAPI) instead of loose trimmed patches — keeps the body "
-            "watertight and the blend editable in CAD. Fillets whose edge "
+            "watertight and the blend editable in CAD. Applies when the export "
+            "produces a single body (Merge / cutters); fillets whose edge "
             "cannot be found fall back to patches (OCCT only)"
         ),
         default=True,
