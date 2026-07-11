@@ -44,3 +44,62 @@ jobs:
 
       - name: Byte-compile all modules
         run: python -m compileall reverse_mesh
+
+  occt:
+    name: OCCT kernel path
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies (numpy + OpenCASCADE binding)
+        run: python -m pip install --upgrade pip numpy cadquery-ocp
+
+      - name: OCCT export tests (booleans, sewing, validation)
+        run: python reverse_mesh/tests/test_occ_export.py
+
+      - name: STEP writer tests (with kernel round-trip where available)
+        working-directory: reverse_mesh
+        run: python tests/test_step.py
+
+  blender:
+    name: Blender headless
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve latest Blender 4.2 LTS build
+        id: blender
+        run: |
+          name=$(curl -fsSL https://download.blender.org/release/Blender4.2/ \
+            | grep -oP 'blender-4\.2\.\d+-linux-x64\.tar\.xz' | sort -uV | tail -1)
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Blender
+        id: cache-blender
+        uses: actions/cache@v4
+        with:
+          path: ~/blender.tar.xz
+          key: ${{ steps.blender.outputs.name }}
+
+      - name: Download Blender
+        if: steps.cache-blender.outputs.cache-hit != 'true'
+        run: curl -fsSL -o ~/blender.tar.xz
+          "https://download.blender.org/release/Blender4.2/${{ steps.blender.outputs.name }}"
+
+      - name: Extract Blender and install headless system libraries
+        run: |
+          mkdir -p "$HOME/blender"
+          tar -xf "$HOME/blender.tar.xz" -C "$HOME/blender" --strip-components=1
+          sudo apt-get update -q
+          sudo apt-get install -yq libxi6 libxxf86vm1 libxfixes3 libxrender1 libgl1 libegl1 libsm6
+
+      - name: Blender integration smoke test
+        run: $HOME/blender/blender --background --python reverse_mesh/tests/blender_smoke.py
+
+      - name: Forward-build workflow test
+        run: $HOME/blender/blender --background --python reverse_mesh/tests/test_forward.py

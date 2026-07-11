@@ -1589,10 +1589,22 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
         layout.use_property_split = True
         layout.use_property_decorate = False
 
+        ensure_occt_on_path()
+        occ_ok = occ_export.is_available()
+        will_use_occt = occ_ok and self.backend != "PUREPYTHON"
+
         layout.prop(self, "backend")
-        layout.prop(self, "py_cutters")
+        if not will_use_occt:
+            warn = layout.column(align=True)
+            warn.alert = True
+            if self.backend == "OCCT" and not occ_ok:
+                warn.label(text="OCCT not installed — will fall back", icon="ERROR")
+            warn.label(text="Pure-Python writer: cutters are NOT cut,", icon="ERROR")
+            warn.label(text="no merging, watertightness or validation")
+            layout.prop(self, "py_cutters")
 
         box = layout.box()
+        box.enabled = will_use_occt
         box.label(text="Booleans / healing (OCCT)")
         box.prop(self, "merge_solids")
         box.prop(self, "ordered_booleans")

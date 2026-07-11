@@ -5,6 +5,22 @@ import bpy
 from bpy.types import Panel, UIList
 
 
+def occt_ready():
+    """True when the OCCT kernel is importable (checks the install dir too)."""
+    from . import occ_export
+    from .operators import ensure_occt_on_path
+    ensure_occt_on_path()
+    return occ_export.is_available()
+
+
+def draw_no_occt_cutter_warning(layout):
+    """Red inline notice: subtractive features cannot be cut without OCCT."""
+    warn = layout.column(align=True)
+    warn.alert = True
+    warn.label(text="Cutting holes needs the OCCT kernel", icon="ERROR")
+    warn.label(text="Install it from the Export box below")
+
+
 class REVERSE_UL_features(UIList):
     """List view of fitted features for this session."""
 
@@ -58,6 +74,8 @@ class REVERSE_PT_build(Panel):
         col.prop(settings, "default_operation", text="Role")
         if settings.default_operation == "SUBTRACT":
             col.prop(settings, "default_cut_mode", text="Cut")
+            if not occt_ready():
+                draw_no_occt_cutter_warning(col)
 
         icon_for = {"BOX": "MESH_CUBE", "CYLINDER": "MESH_CYLINDER",
                     "CONE": "MESH_CONE", "SPHERE": "MESH_UVSPHERE",
@@ -113,6 +131,8 @@ class REVERSE_PT_main(Panel):
         col.prop(settings, "default_operation", text="Role")
         if settings.default_operation == "SUBTRACT":
             col.prop(settings, "default_cut_mode", text="Cut")
+            if not occt_ready():
+                draw_no_occt_cutter_warning(col)
 
         obj = context.active_object
         in_edit = obj and obj.type == "MESH" and obj.mode == "EDIT"
@@ -269,16 +289,22 @@ class REVERSE_PT_features(Panel):
         box.operator("reverse.export_step", text="Export STEP (AP242)", icon="FILE_CACHE")
 
         from . import occ_export
-        from .operators import ensure_occt_on_path
-        ensure_occt_on_path()
-        if occ_export.is_available():
+        if occt_ready():
             row = box.row()
             row.label(text=f"OCCT ready ({occ_export.backend_name()})", icon="CHECKMARK")
         else:
+            # Degraded mode: the pure-Python fallback cannot cut, merge, sew or
+            # validate — say so where the user is about to export.
+            has_cutters = any(f.operation == "SUBTRACT" for f in settings.features)
             col = box.column(align=True)
-            col.label(text="OCCT kernel not installed", icon="INFO")
-            col.label(text="(optional: enables merged solids)")
-            col.operator("reverse.install_occt", icon="IMPORT")
+            col.alert = has_cutters
+            col.label(text="OCCT kernel not installed",
+                      icon="ERROR" if has_cutters else "INFO")
+            if has_cutters:
+                col.label(text="Subtract features will NOT be cut")
+            col.label(text="Needed for holes, merged solids, validation")
+            col.operator("reverse.install_occt", icon="IMPORT",
+                         text="Install OCCT (recommended)")
 
 
 class REVERSE_PT_report(Panel):
