@@ -5,9 +5,11 @@ description: Run the full BlenderMesh2STEP test matrix — standalone NumPy test
 
 # Run the full test matrix
 
-Run all tiers from the repo root. CI (`.github/workflows/tests.yml`) only covers
-Tier 1 — Tiers 2 and 3 are **local-only** and must be run by hand before any
-release or export-related change.
+Run all tiers from the repo root. CI (`.github/workflows/tests.yml`) covers all
+three tiers (Tier 2 via a plain-Python `cadquery-ocp` job, Tier 3 via a headless
+Blender 4.2 LTS job), but still run them locally before any release or
+export-related change — the local Blender (5.x snap) catches forward-compat
+issues CI's 4.2 does not.
 
 ## Tier 1 — Standalone Python (pure NumPy, no Blender)
 
