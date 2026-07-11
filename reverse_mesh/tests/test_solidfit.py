@@ -83,6 +83,51 @@ def test_box_is_one_box():
     assert cov > 0.85, cov
 
 
+def _torus_sdf(R, r):
+    """Ring torus about z. Positive inside."""
+    def fn(p):
+        rho = np.hypot(p[..., 0], p[..., 1])
+        return r - np.hypot(rho - R, p[..., 2])
+    return fn
+
+
+def _cone_sdf(r0, r1, h):
+    """Frustum along z from 0..h, radius r0 at the base, r1 at the top.
+
+    Approximate interior signed distance: min of the (perpendicular) lateral
+    clearance and the two cap clearances — exact enough for inradius profiles.
+    """
+    import math
+    slope = (r1 - r0) / h
+    cosa = math.cos(math.atan(abs(slope)))
+    def fn(p):
+        z = p[..., 2]
+        rho = np.hypot(p[..., 0], p[..., 1])
+        r_at = r0 + slope * np.clip(z, 0.0, h)
+        lat = (r_at - rho) * cosa
+        return np.minimum(np.minimum(lat, z), h - z)
+    return fn
+
+
+def test_torus_is_one_torus():
+    g = _grid(_torus_sdf(2.0, 0.6), [-2.8, -2.8, -0.8], [2.8, 2.8, 0.8], 0.1)
+    results, cov = fit_solids(g)
+    print("torus:", [r.summary for r in results], f"coverage={cov:.2f}")
+    assert results and results[0].kind == "TORUS", [r.kind for r in results]
+    p = results[0].params
+    assert abs(p["major_radius"] - 2.0) < 0.15, p
+    assert abs(p["minor_radius"] - 0.6) < 0.12, p
+    assert cov > 0.8, cov
+
+
+def test_cone_is_one_cone():
+    g = _grid(_cone_sdf(1.6, 0.4, 2.4), [-1.8, -1.8, -0.2], [1.8, 1.8, 2.6], 0.08)
+    results, cov = fit_solids(g)
+    print("cone:", [r.summary for r in results], f"coverage={cov:.2f}")
+    assert results and results[0].kind == "CONE", [r.kind for r in results]
+    assert cov > 0.75, cov
+
+
 def _run_all():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

@@ -36,6 +36,12 @@ real Add/Subtract booleans, sewing, and validation reports) are **done**:
 
 ## Near-term roadmap (ordered)
 
+> **Status 2026-07-12:** Phases 1–6 below are implemented, in the stacked PR
+> series #9 (docs/plan) → #10 (OCCT-first + CI) → #11 (extrude) → #12 (fillet
+> blends) → #13 (revolve) → #14 (XCAF multi-body) → #15 (solid-fit cone/torus);
+> merge in that order. Wheel bundling (Phase 1's investigation item) remains
+> open, as does chamfer recognition from Phase 3.
+
 ### Phase 1 — OCCT-first packaging + CI for the kernel path
 *Why first: every High-severity bug so far (silent ×1000 units, cutters
 written as filled material) lived in the layers CI does not exercise.*
