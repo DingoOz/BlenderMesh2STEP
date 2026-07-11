@@ -189,6 +189,46 @@ def main():
     print("[ok] cube → 6 planes (not a sphere)")
     bpy.ops.object.mode_set(mode="OBJECT")
 
+    # Extrude (#12a): a hexagonal prism fits as an extruded 6-line profile —
+    # through AUTO (the face-centroid gate must reject the vertex-coincident
+    # sphere) and rms at machine precision.
+    nx = len(bpy.context.scene.reverse.features)
+    bpy.ops.mesh.primitive_cylinder_add(vertices=6, radius=1.0, depth=2.0,
+                                        location=(0.0, -30.0, 0.0))
+    hexobj = bpy.context.active_object
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="SELECT")
+    settings.primitive_type = "AUTO"
+    settings.segment_regions = False
+    if bpy.ops.reverse.fit_selection() != {"FINISHED"}:
+        fail("extrude fit failed")
+    xfeat = bpy.context.scene.reverse.features[nx]
+    if xfeat.kind != "EXTRUDE" or xfeat.rms > 1e-6:
+        fail(f"hex prism should AUTO-fit as EXTRUDE, got {xfeat.kind} rms={xfeat.rms}")
+    xobj = bpy.data.objects.get(xfeat.object_name)
+    prof = [list(r) for r in xobj["reverse"]["profile"]]
+    if len(prof) != 6 or any(r[0] != 0.0 for r in prof):
+        fail(f"hex profile should be 6 LINE rows, got {len(prof)}")
+    if abs(xobj["reverse"]["height"] - 2.0) > 1e-6:
+        fail(f"extrude height {xobj['reverse']['height']} != 2.0")
+    print(f"[ok] hex prism → {xfeat.summary} rms={xfeat.rms:.2e}")
+    bpy.ops.object.mode_set(mode="OBJECT")
+
+    # Extrude (#12b): forward-built N-gon prism with live radius edit.
+    if bpy.ops.reverse.add_primitive(kind="EXTRUDE", sides=8, radius=1.5,
+                                     height=3.0) != {"FINISHED"}:
+        fail("forward extrude add failed")
+    bobj = bpy.context.active_object
+    data = bobj["reverse"]
+    if data["kind"] != "EXTRUDE" or len(data["profile"]) != 8:
+        fail(f"built extrude wrong: {data['kind']} rows={len(data['profile'])}")
+    bobj.reverse_build.radius = 2.5                      # live edit → profile refresh
+    import math as _m2
+    r_new = _m2.hypot(bobj["reverse"]["profile"][0][1], bobj["reverse"]["profile"][0][2])
+    if abs(r_new - 2.5) > 1e-9:
+        fail(f"profile did not follow radius edit: {r_new} != 2.5")
+    print("[ok] forward extrude: 8-gon prism built, profile follows radius edit")
+
     # Whole cube, no segmentation: AUTO must now pick a BOX (not torus/sphere).
     n0 = len(bpy.context.scene.reverse.features)
     bpy.ops.mesh.primitive_cube_add(size=2.0)

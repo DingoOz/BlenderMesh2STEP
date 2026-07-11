@@ -25,7 +25,7 @@ except ImportError:                      # standalone (pure-Python tests)
     from fitting.common import FitResult
     from fitting.primitives import summarize
 
-BUILD_KINDS = ("BOX", "CYLINDER", "CONE", "SPHERE", "TORUS")
+BUILD_KINDS = ("BOX", "CYLINDER", "CONE", "SPHERE", "TORUS", "EXTRUDE")
 
 # Editable dimension fields per kind: (param key, UI label). Keys match the
 # fitters' schemas / _PARAM_KINDS in operators.py and the reverse_build
@@ -37,6 +37,10 @@ PARAM_FIELDS = {
              ("height", "Height")),
     "SPHERE": (("radius", "Radius"),),
     "TORUS": (("major_radius", "Major radius"), ("minor_radius", "Minor radius")),
+    # Forward-built extrusions are regular N-gon prisms: the side count is
+    # fixed at creation; circumradius and height stay live-editable, and each
+    # edit regenerates the stored profile (see refresh_extrude_profile).
+    "EXTRUDE": (("radius", "Radius"), ("height", "Height")),
 }
 
 
@@ -68,7 +72,36 @@ def make_params(kind: str, dims: dict, location) -> dict:
     if kind == "TORUS":
         return {"center": loc, "axis": z, "major_radius": d["major_radius"],
                 "minor_radius": d["minor_radius"]}
+    if kind == "EXTRUDE":
+        try:
+            from .fitting import profile as profile2d
+        except ImportError:                  # standalone (pure-Python tests)
+            from fitting import profile as profile2d
+        h = d["height"]
+        sides = int(d.get("sides", 6))
+        base = [loc[0], loc[1], loc[2] - h / 2.0]   # centre the body on the drop
+        prof = profile2d.ngon_profile(sides, d["radius"])
+        return {"base": base, "axis": z, "xdir": [1.0, 0.0, 0.0], "height": h,
+                "radius": d["radius"], "sides": float(sides),
+                "profile": [[float(x) for x in row] for row in prof]}
     raise ValueError(f"Not a forward-build kind: {kind}")
+
+
+def refresh_extrude_profile(params: dict) -> bool:
+    """Regenerate an N-gon EXTRUDE's profile after a radius edit (in place).
+
+    Only applies to forward-built prisms (they carry ``sides``); fitted
+    extrusions keep their measured profile. Returns True when refreshed.
+    """
+    if params.get("kind", "EXTRUDE") != "EXTRUDE" or "sides" not in params.keys():
+        return False
+    try:
+        from .fitting import profile as profile2d
+    except ImportError:
+        from fitting import profile as profile2d
+    prof = profile2d.ngon_profile(int(params["sides"]), float(params["radius"]))
+    params["profile"] = [[float(x) for x in row] for row in prof]
+    return True
 
 
 def make_result(kind: str, params: dict) -> FitResult:
@@ -107,6 +140,9 @@ def rebuild_object(obj, segments: int = 48):
     # by rebuilding them around the current placement.
     params = {k: (list(v) if hasattr(v, "__len__") and not isinstance(v, str) else v)
               for k, v in data.items()}
+    # An N-gon prism's profile is derived from radius/sides — regenerate it so
+    # a radius edit (or baked scale) is reflected in the rebuilt mesh.
+    refreshed = refresh_extrude_profile(params)
     verts, faces, matrix = build.generate_mesh(kind, params, segments)
 
     mesh = obj.data
@@ -132,6 +168,8 @@ def rebuild_object(obj, segments: int = 48):
     obj.matrix_world = delta @ matrix
 
     new = dict(data)
+    if refreshed:
+        new["profile"] = params["profile"]
     new["_xform"] = [matrix[i][j] for i in range(4) for j in range(4)]
     new["_fingerprint"] = build.mesh_fingerprint(mesh)
     # Reassign the whole dict: nested IDProperty writes don't reliably tag updates.

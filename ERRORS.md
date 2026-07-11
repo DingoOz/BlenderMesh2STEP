@@ -149,3 +149,13 @@
 - **Root cause:** Treated `matrix_world` as a plain derived attribute rather than a depsgraph-evaluated one; the bake-scale operator cleared the scale and immediately rebuilt, so the rebuild's delta still contained the old scale and re-applied it.
 - **Fix applied:** Call `context.view_layer.update()` between the scale write and the rebuild so `matrix_world` is current when the delta is computed; the integration test asserts the scale is actually 1 after baking.
 - **Prevention rule:** After mutating `location`/`rotation`/`scale` (or parenting), never read `matrix_world` in the same operator without an intervening `view_layer.update()` (or compose the matrix yourself); add a test asserting the post-condition on the evaluated transform.
+
+### Underdetermined torus fit accepts a prism's vertex rings — 2026-07-11
+
+- **Severity:** High
+- **Category:** Logic
+- **File(s):** `reverse_mesh/fitting/primitives.py`
+- **Pattern:** Trusting a zero-residual least-squares fit whose sample configuration does not determine the model — a degenerate point set (here: all vertices on ≤2 circles about the torus axis) admits an entire family of exact solutions, so rms = 0 carries no evidence about the shape.
+- **Root cause:** `fit_torus` solves the radii by linear least squares; a hexagonal prism's 12 vertices form exactly 2 (rho, |w|) circles, making the system rank-deficient. The minimal-norm torus passes through every vertex exactly and slipped through AUTO's alignment and face-residual gates, misclassifying prisms as tori.
+- **Fix applied:** `fit_torus` now counts distinct (rho, |w|) circles at the fitted axis and returns None below 3.
+- **Prevention rule:** Before accepting an essentially-exact fit, check the sample set constrains all of the model's degrees of freedom; symmetric/layered selections (vertex rings, two planes) need explicit degeneracy guards, like the giant-radius sphere/cylinder and box-normal gates already in place.

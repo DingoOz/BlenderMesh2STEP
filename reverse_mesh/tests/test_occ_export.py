@@ -419,6 +419,77 @@ def main():
     except OSError:
         pass
 
+    # Extrude (#12): a stadium-slot prism must export as an exact solid on both
+    # backends (volume = (8 + π) · h), and cut as a pocket via booleans.
+    stadium = {"kind": "EXTRUDE", "name": "slot", "params": {
+        "base": (0, 0, 0), "axis": (0, 0, 1), "xdir": (1, 0, 0), "height": 1.5,
+        "profile": [
+            [0, -2, -1, 2, -1, 0, 0, 0],
+            [1, 2, -1, 2, 1, 2, 0, 1],
+            [0, 2, 1, -2, 1, 0, 0, 0],
+            [1, -2, 1, -2, -1, -2, 0, 1],
+        ]}}
+    vol_expected = (8.0 + math.pi) * 1.5
+    out_ex = os.path.join(os.path.dirname(__file__), "occ_extrude.step")
+    info_ex = occ_export.export([stadium], out_ex, unit="MM")
+    if not info_ex.solids or abs(info_ex.solids[0]["volume"] - vol_expected) > 1e-6 \
+            or not info_ex.solids[0]["valid"]:
+        fail(f"OCCT extrude solid wrong: {info_ex.solids}")
+    print(f"[ok] OCCT extrude: volume {info_ex.solids[0]['volume']:.6f} "
+          f"= (8+π)·1.5, valid")
+
+    # Pure-Python extrude: hand-written closed B-rep must re-read valid with the
+    # same exact volume (this exercises the shared-edge shell and concave arcs).
+    notch = {"kind": "EXTRUDE", "name": "notch", "params": {
+        "base": (0, 0, 0), "axis": (0, 0, 1), "xdir": (1, 0, 0), "height": 1.0,
+        "profile": [
+            [0, -2, -2, -1, -2, 0, 0, 0],
+            [1, -1, -2, 1, -2, 0, -2, 0],      # concave (cw) arc notch
+            [0, 1, -2, 2, -2, 0, 0, 0],
+            [0, 2, -2, 2, 2, 0, 0, 0],
+            [0, 2, 2, -2, 2, 0, 0, 0],
+            [0, -2, 2, -2, -2, 0, 0, 0],
+        ]}}
+    out_exp = os.path.join(os.path.dirname(__file__), "py_extrude.step")
+    with open(out_exp, "w") as f:
+        f.write(step_export.build_step([stadium, notch], unit="MM", product_name="Ex"))
+    rex = STEPControl_Reader()
+    if rex.ReadFile(out_exp) != IFSelect_RetDone:
+        fail("pure-Python extrude did not re-read")
+    rex.TransferRoots(); shex = rex.OneShape()
+    if shex.IsNull() or not BRepCheck_Analyzer(shex).IsValid():
+        fail("pure-Python extrude re-read invalid")
+    vex = GProp_GProps(); BRepGProp.VolumeProperties_s(shex, vex)
+    vol_both = vol_expected + (16.0 - math.pi / 2.0) * 1.0
+    if abs(vex.Mass() - vol_both) > 1e-6:
+        fail(f"pure-Python extrude volume {vex.Mass():.6f} != {vol_both:.6f}")
+    print(f"[ok] pure-Python extrude: 2 solids re-read valid, volume exact "
+          f"({vex.Mass():.6f})")
+
+    # Extrude as a SUBTRACT cutter: hexagonal pocket milled from a box.
+    hexp = [[0, math.cos(2 * math.pi * i / 6), math.sin(2 * math.pi * i / 6),
+             math.cos(2 * math.pi * (i + 1) / 6), math.sin(2 * math.pi * (i + 1) / 6),
+             0, 0, 0] for i in range(6)]
+    base_box = {"kind": "BOX", "name": "b", "params": {
+        "center": (0, 0, 0), "ax": (1, 0, 0), "ay": (0, 1, 0), "az": (0, 0, 1),
+        "hx": 3.0, "hy": 3.0, "hz": 1.0}}
+    hex_cut = {"kind": "EXTRUDE", "name": "pocket", "op": "SUBTRACT", "params": {
+        "base": (0, 0, -1.0), "axis": (0, 0, 1), "xdir": (1, 0, 0), "height": 2.0,
+        "profile": hexp}}
+    out_cut = os.path.join(os.path.dirname(__file__), "occ_extrude_cut.step")
+    info_cut = occ_export.export([base_box, hex_cut], out_cut, unit="MM", merge=True)
+    hex_area = 6.0 * math.sqrt(3.0) / 4.0
+    vol_cut = 6.0 * 6.0 * 2.0 - hex_area * 2.0
+    if not info_cut.solids or abs(info_cut.solids[0]["volume"] - vol_cut) > 1e-6:
+        fail(f"extrude cutter wrong: {info_cut.solids} expected {vol_cut}")
+    print(f"[ok] extrude as cutter: hex pocket volume exact "
+          f"({info_cut.solids[0]['volume']:.6f})")
+    for f in (out_ex, out_exp, out_cut):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+
     for f in (out, out2):
         try:
             os.remove(f)

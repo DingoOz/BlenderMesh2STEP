@@ -189,11 +189,20 @@ Cone     & apex, half-angle, radii          & full cones and frustums \\
 Sphere   & centre, radius                   & \\
 Torus    & axis, major + minor radius       & best on full rings \\
 Fillet   & edge round $\to$ partial cylinder & radius + arc extent; arcs $<330^\circ$ \\
+Extrude  & prism: planar line/arc profile + height & select the whole prism incl.\ caps \\
 Auto     & best of the above                & normal-agreement gate + simplicity tie-break \\
 \bottomrule
 \end{tabular}
 \caption{Fittable primitives. All fits report RMS and maximum error.}
 \end{table}
+
+The \textbf{Extrude} fit recovers the archetypal Blender-authored mechanical
+part: a planar outline of lines and arcs swept along an axis (brackets,
+plates, slots, bosses). Select the \emph{entire} prism — side walls and both
+end caps — and the fitter recovers the axis, the height, and an exact
+line/arc profile (tangent arcs such as slot ends are recognised as true
+arcs, not chains of facets). It exports as a genuine B-rep solid on both
+backends and can act as a \emph{Subtract} cutter (a milled pocket).
 
 \ui{Auto-detect} tries every primitive and keeps the best fit, preferring the
 \emph{simplest} primitive when several explain the selection equally well
@@ -298,9 +307,10 @@ renames of the session list.
 \label{sec:forward}
 
 The \ui{Build} panel adds solids that are STEP-exportable by construction:
-\textbf{Box, Cylinder, Cone (frustum), Sphere, Torus}. The exact analytic
-parameters are stored on the object; the viewport mesh is just a preview
-tessellation.
+\textbf{Box, Cylinder, Cone (frustum), Sphere, Torus, Extrude (N-gon prism)}.
+The exact analytic parameters are stored on the object; the viewport mesh is
+just a preview tessellation. For the extruded prism, pick the side count when
+adding; the circumradius and height stay live-editable and the profile follows.
 
 \begin{itemize}[nosep]
   \item Pick a primitive and a \ui{Role} (Add or Subtract --- a forward-built

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import profile as profile2d
 from .common import (
     FitResult,
     Region,
@@ -41,6 +42,12 @@ def summarize(kind: str, p: dict) -> str:
         return f"Torus · R={p['major_radius']:.4g} r={p['minor_radius']:.4g}"
     if kind == "BOX":
         return f"Box · {2 * p['hx']:.3g}×{2 * p['hy']:.3g}×{2 * p['hz']:.3g}"
+    if kind == "EXTRUDE":
+        rows = np.asarray(p["profile"], dtype=float)
+        n_arc = int(np.sum(rows[:, 0] == profile2d.ARC))
+        n_line = len(rows) - n_arc
+        segs = f"{n_line}L" + (f"+{n_arc}A" if n_arc else "")
+        return f"Extrude · {segs} · h={p['height']:.4g}"
     return kind
 
 
@@ -52,6 +59,7 @@ _LENGTH_KEYS = {
     "CONE": ("radius1", "radius2", "height"),
     "SPHERE": ("radius",),
     "TORUS": ("major_radius", "minor_radius"),
+    "EXTRUDE": ("height",),
 }
 
 
@@ -319,6 +327,19 @@ def fit_torus(region: Region) -> FitResult | None:
     axis, big_r, r_tube = best[1], best[2], best[3]
     if big_r <= 1e-9 or r_tube <= 1e-9:
         return None
+    # Degeneracy guard: points lying on ≤2 circles about the axis (e.g. a
+    # prism's two vertex rings) leave the torus underdetermined — a whole
+    # family of tori passes through them exactly, so an rms of 0 means
+    # nothing. Require at least 3 distinct (rho, |w|) circles.
+    scale = region_scale(points)
+    d = points - center
+    wv = d @ axis
+    rho = np.linalg.norm(d - np.outer(wv, axis), axis=1)
+    q = max(1e-6 * scale, 1e-12)
+    circles = {(round(float(r_) / q), round(abs(float(w_)) / q))
+               for r_, w_ in zip(rho, wv)}
+    if len(circles) < 3:
+        return None
     _, _, dist = _torus_on_axis(points, center, axis)
     rms, max_err = residual_stats(dist)
 
@@ -487,6 +508,160 @@ def fit_box(region: Region) -> FitResult | None:
                      summary=summarize("BOX", params))
 
 
+# Per-face classification tolerances for the prism (extrude) fit: a face is a
+# cap when |n·axis| exceeds _EXT_CAP_COS, a side when it is below _EXT_SIDE_COS;
+# anything in between means the region is not a clean prism.
+_EXT_CAP_COS = 0.999
+_EXT_SIDE_COS = 0.02
+
+
+def _extrude_on_axis(region: Region, axis: np.ndarray, nu: np.ndarray, scale: float):
+    """Try to reconstruct a prism along ``axis``; None if the region isn't one.
+
+    Returns ``(axis, loop, t_min, height)`` with ``loop`` the ordered 2D
+    profile vertices in the :func:`orthonormal_basis` frame of ``axis``.
+    """
+    points = region.points
+    fverts = region.face_verts
+    align = np.abs(nu @ axis)
+    is_cap = align > _EXT_CAP_COS
+    is_side = align < _EXT_SIDE_COS
+    if not np.all(is_cap | is_side) or not np.any(is_side):
+        return None
+
+    t = points @ axis
+    t_min, t_max = float(t.min()), float(t.max())
+    height = t_max - t_min
+    if height < 1e-6 * scale:
+        return None
+    # Cap faces must actually sit at the ends.
+    if len(region.face_points) == len(fverts):
+        ft = region.face_points @ axis
+        at_end = np.minimum(np.abs(ft - t_min), np.abs(ft - t_max)) < 1e-4 * scale
+        if not np.all(at_end[is_cap]):
+            return None
+
+    e1, e2 = orthonormal_basis(axis)
+    uv_all = np.column_stack([points @ e1, points @ e2])
+
+    # Each side face must project to exactly two distinct profile points — the
+    # signature of a face ruled along the extrusion axis.
+    tol = 1e-6 * scale
+    segs = []
+    for fi in np.nonzero(is_side)[0]:
+        pts2 = uv_all[np.asarray(fverts[fi], dtype=int)]
+        distinct = [pts2[0]]
+        for q in pts2[1:]:
+            if all(np.linalg.norm(q - d) > tol for d in distinct):
+                distinct.append(q)
+        if len(distinct) != 2:
+            return None
+        segs.append((tuple(distinct[0]), tuple(distinct[1])))
+
+    loops = profile2d.chain_segments(segs, tol)
+    if len(loops) != 1:
+        return None                       # open, non-manifold, or has holes
+    return axis, loops[0], t_min, height
+
+
+def _extrude_frame(p):
+    """Orthonormal (e1, e2, axis) from stored extrude params."""
+    axis = _unit(np.asarray(p["axis"], dtype=float))
+    e1 = np.asarray(p["xdir"], dtype=float)
+    e1 = _unit(e1 - np.dot(e1, axis) * axis)
+    e2 = np.cross(axis, e1)
+    return e1, e2, axis
+
+
+def fit_extrude(region: Region) -> FitResult | None:
+    """Extruded planar profile (prism) fit: axis + height + line/arc profile.
+
+    Needs per-face vertex indices (``region.face_verts``) to reconstruct the
+    profile boundary, so it only participates when the region was built from a
+    real mesh. The prism gate is strict: every face must be either a cap
+    (normal ∥ axis) or a side *ruled along the axis* (its vertices project to
+    exactly two distinct profile points), and the profile must chain into one
+    closed loop. Full-circle profiles are rejected — that's a cylinder.
+    """
+    points = region.points
+    normals = region.face_normals
+    fverts = region.face_verts
+    if fverts is None or len(fverts) < 5 or len(points) < 6:
+        return None
+    if len(normals) != len(fverts) or not np.any(normals):
+        return None
+
+    scale = region_scale(points)
+
+    # Axis candidates: every distinct face-normal direction (a cap normal is the
+    # axis) plus the least-represented direction of the normal set (exact when
+    # the selection is side-walls only). Score = how far each face normal is
+    # from being either ∥ or ⊥ to the candidate.
+    nu = normals / np.clip(np.linalg.norm(normals, axis=1, keepdims=True), 1e-12, None)
+    cands = [smallest_singular_axis(nu)]
+    seen = []
+    for n in nu[:: max(1, len(nu) // 64)]:
+        if not any(abs(float(n @ s)) > 0.999 for s in seen):
+            seen.append(n)
+            cands.append(n)
+
+    def score(d):
+        a = np.abs(nu @ d)
+        return float(np.mean(np.minimum(a, 1.0 - a) ** 2))
+
+    # A rectilinear prism satisfies the ∥/⊥ normal criterion along *several*
+    # directions (an L-bracket scores perfectly along its profile axes too), so
+    # try the candidates in score order and keep the first whose profile
+    # actually reconstructs: side faces ruled along the axis, one closed loop.
+    cands.sort(key=score)
+    picked = None
+    for axis in cands:
+        if score(axis) > 1e-6:
+            break                          # candidates are sorted; rest are worse
+        got = _extrude_on_axis(region, axis, nu, scale)
+        if got is not None:
+            picked = got
+            break
+    if picked is None:
+        return None
+    axis, loop, t_min, height = picked
+
+    e1, e2 = orthonormal_basis(axis)
+    prof = profile2d.segment_loop(loop, scale)
+    if prof is None:
+        return None                       # no corners → a full circle → cylinder
+
+    # Frame origin: on the bottom plane, at the loop centroid (keeps profile
+    # coordinates small and the object origin inside the part).
+    c2 = loop.mean(axis=0)
+    base = e1 * c2[0] + e2 * c2[1] + axis * t_min
+    prof = prof.copy()
+    prof[:, 1:7:2] -= c2[0]               # sx, ex, cx
+    prof[:, 2:7:2] -= c2[1]               # sy, ey, cy
+    # Guard: the recentring must keep LINE rows' unused center columns at zero.
+    prof[prof[:, 0] == profile2d.LINE, 5:7] = 0.0
+
+    # Residual: every vertex lies on a side wall (2D distance to the boundary)
+    # or on a cap plane (axial distance to an end).
+    t = points @ axis
+    uv_c = np.column_stack([points @ e1, points @ e2]) - c2
+    d2d = profile2d.distance_to_profile(prof, uv_c)
+    d_cap = np.minimum(np.abs(t - t_min), np.abs(t - (t_min + height)))
+    resid = np.minimum(d2d, d_cap)
+    rms, max_err = residual_stats(resid)
+
+    params = {
+        "base": base,
+        "axis": axis,
+        "xdir": e1,
+        "height": height,
+        "profile": prof,
+        "_scale": scale,
+    }
+    return FitResult(kind="EXTRUDE", rms=rms, max_error=max_err, params=params,
+                     summary=summarize("EXTRUDE", params))
+
+
 def predicted_normals(result: FitResult, pts: np.ndarray) -> np.ndarray:
     """Unit surface normals the fitted primitive predicts at ``pts``.
 
@@ -534,6 +709,21 @@ def predicted_normals(result: FitResult, pts: np.ndarray) -> np.ndarray:
         # Spine point = centre + R·radial_unit; normal points from spine to p.
         n = (radial / rho) * (rho - p["major_radius"]) + np.outer(w, axis)
         return n / np.clip(np.linalg.norm(n, axis=1, keepdims=True), 1e-12, None)
+    if result.kind == "EXTRUDE":
+        e1, e2, axis = _extrude_frame(p)
+        rel = pts - np.asarray(p["base"], dtype=float)
+        t = rel @ axis
+        h = float(p["height"])
+        uv = np.column_stack([rel @ e1, rel @ e2])
+        prof = np.asarray(p["profile"], dtype=float)
+        d2d = profile2d.distance_to_profile(prof, uv)
+        # Nearer to an end plane than to the side wall → a cap face (normal ∥
+        # axis; sign is irrelevant to the |cos| alignment metric).
+        d_cap = np.minimum(np.abs(t), np.abs(t - h))
+        n2 = profile2d.outward_normals(prof, uv)
+        out = np.outer(n2[:, 0], e1) + np.outer(n2[:, 1], e2)
+        out[d_cap < d2d] = axis
+        return out
     raise ValueError(result.kind)
 
 
@@ -573,6 +763,15 @@ def signed_distances(result: FitResult, pts: np.ndarray) -> np.ndarray:
         half = np.array([p["hx"], p["hy"], p["hz"]])
         local = np.column_stack([(pts - np.asarray(p["center"])) @ a for a in axes])
         return np.min(half - np.abs(local), axis=1)   # matches fit_box's surf_dist
+    if result.kind == "EXTRUDE":
+        e1, e2, axis = _extrude_frame(p)
+        rel = pts - np.asarray(p["base"], dtype=float)
+        t = rel @ axis
+        h = float(p["height"])
+        uv = np.column_stack([rel @ e1, rel @ e2])
+        d2d = profile2d.distance_to_profile(np.asarray(p["profile"], dtype=float), uv)
+        d_cap = np.minimum(np.abs(t), np.abs(t - h))
+        return np.minimum(d2d, d_cap)      # matches fit_extrude's residual
     raise ValueError(result.kind)
 
 
@@ -598,6 +797,7 @@ FITTERS = {
     "CONE": fit_cone,
     "SPHERE": fit_sphere,
     "TORUS": fit_torus,
+    "EXTRUDE": fit_extrude,
 }
 
 
@@ -605,13 +805,35 @@ FITTERS = {
 # fit to be trusted in AUTO mode.
 _ALIGNMENT_GATE = 0.9
 
+# Face *centroids* must also lie near the surface (relative RMS) for a fit to
+# be trusted in AUTO mode. Vertices alone can coincide with a surface the mesh
+# does not represent — a hexagonal prism's 12 vertices lie exactly on a sphere
+# — but the sphere fails at the face centroids, while genuine tessellated
+# surfaces keep their centroid sag well inside this bound.
+_FACE_RESIDUAL_GATE = 0.02
+
 # A fit this good (relative RMS) is considered "essentially exact".
 _GOOD_FIT = 1e-3
+
+
+def _face_residual(result: FitResult, region: Region) -> float:
+    """Relative RMS of the fitted surface at the region's face centroids."""
+    if not len(region.face_points):
+        return 0.0
+    try:
+        d = signed_distances(result, region.face_points)
+    except ValueError:
+        return 0.0
+    scale = result.params.get("_scale", 1.0) or 1.0
+    return float(np.sqrt(np.mean(d ** 2))) / scale
 
 # Occam tie-break: when several primitives all fit well, prefer the simpler,
 # more CAD-likely one. (A two-ring band fits both a cylinder and a sphere — the
 # cylinder is the simpler explanation.)
-_PREFERENCE = {"PLANE": 0, "BOX": 1, "CYLINDER": 2, "CONE": 3, "SPHERE": 4, "TORUS": 5}
+# EXTRUDE sits last: it is the most general shape, so any canonical primitive
+# that also fits exactly (box, cylinder) is the better statement of intent.
+_PREFERENCE = {"PLANE": 0, "BOX": 1, "CYLINDER": 2, "CONE": 3, "SPHERE": 4,
+               "TORUS": 5, "EXTRUDE": 6}
 
 
 def fit_auto(region: Region, return_candidates: bool = False):
@@ -639,7 +861,9 @@ def fit_auto(region: Region, return_candidates: bool = False):
     if not candidates:
         return (None, []) if return_candidates else None
 
-    aligned = [r for r in candidates if normal_alignment(r, region) >= _ALIGNMENT_GATE]
+    aligned = [r for r in candidates
+               if normal_alignment(r, region) >= _ALIGNMENT_GATE
+               and _face_residual(r, region) <= _FACE_RESIDUAL_GATE]
     pool = aligned if aligned else candidates
 
     good = [r for r in pool if r.rel_rms < _GOOD_FIT]

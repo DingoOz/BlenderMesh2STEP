@@ -16,7 +16,9 @@ from __future__ import annotations
 import importlib
 import math
 
-from .step_export import _add, _cross, _norm, _perp, _scale, _sub, _unit  # geometry helpers
+from .step_export import (  # geometry helpers
+    _add, _cross, _dot, _norm, _perp, _scale, _sub, _unit,
+)
 
 
 def is_available() -> bool:
@@ -133,6 +135,12 @@ def _grow_cutter(kind, p, frac, ends="BOTH"):
         q["height"] = h + (g if grow_low else 0.0) + (g if grow_high else 0.0)
         q["radius1"] = max(0.0, p["radius1"] - slope * g) if grow_low else p["radius1"]
         q["radius2"] = max(0.0, p["radius2"] + slope * g) if grow_high else p["radius2"]
+    elif kind == "EXTRUDE":
+        h = p["height"]
+        g = frac * h
+        base = tuple(float(c) for c in p["base"])     # on the bottom profile plane
+        q["base"] = _sub(base, _scale(axis, g)) if grow_low else base
+        q["height"] = h + (g if grow_low else 0.0) + (g if grow_high else 0.0)
     # Boxes / spheres / tori have no single pair of "ends"; left unchanged.
     return q
 
@@ -178,7 +186,23 @@ def _cutter_end_centers(kind, p):
     if kind == "CONE":
         base = tuple(float(c) for c in p["base"])
         return base, _add(base, _scale(axis, p["height"]))
+    if kind == "EXTRUDE":
+        e1, e2 = _extrude_basis(p)
+        rows = [[float(x) for x in row] for row in p["profile"]]
+        cu = sum(r[1] for r in rows) / len(rows)
+        cv = sum(r[2] for r in rows) / len(rows)
+        low = _add(tuple(float(c) for c in p["base"]),
+                   _add(_scale(e1, cu), _scale(e2, cv)))
+        return low, _add(low, _scale(axis, p["height"]))
     return None
+
+
+def _extrude_basis(p):
+    """Orthonormal in-plane (e1, e2) of an EXTRUDE feature's profile frame."""
+    axis = _unit(tuple(float(c) for c in p["axis"]))
+    e1 = tuple(float(c) for c in p["xdir"])
+    e1 = _unit(_sub(e1, _scale(axis, _dot(e1, axis))))
+    return e1, _cross(axis, e1)
 
 
 def _unify(shape):
@@ -496,6 +520,36 @@ def _make_shape(kind, p, gp_Pnt, gp_Dir, gp_Ax3, gp_Pln,
         if n_faces == 0:
             return None, False
         return comp, False
+    if kind == "EXTRUDE":
+        # Profile wire (lines + three-point arcs) → planar face → prism.
+        (MakePrism,) = _imp("BRepPrimAPI", "BRepPrimAPI_MakePrism")
+        (MakeEdge, MakeWire) = _imp("BRepBuilderAPI", "BRepBuilderAPI_MakeEdge",
+                                    "BRepBuilderAPI_MakeWire")
+        (GC_MakeArcOfCircle,) = _imp("GC", "GC_MakeArcOfCircle")
+        (gp_Vec,) = _imp("gp", "gp_Vec")
+        from .fitting import profile as profile2d
+
+        axis = _unit(tuple(float(c) for c in p["axis"]))
+        e1, e2 = _extrude_basis(p)
+        base = tuple(float(c) for c in p["base"])
+        h = float(p["height"])
+
+        def to3(uv):
+            pt = _add(base, _add(_scale(e1, uv[0]), _scale(e2, uv[1])))
+            return gp_Pnt(pt[0], pt[1], pt[2])
+
+        wire = MakeWire()
+        for row in p["profile"]:
+            row = [float(x) for x in row]
+            s2, t2 = (row[1], row[2]), (row[3], row[4])
+            if row[0] == profile2d.ARC:
+                mid = profile2d.arc_midpoint(row)
+                arc = GC_MakeArcOfCircle(to3(s2), to3(mid), to3(t2)).Value()
+                wire.Add(MakeEdge(arc).Edge())
+            else:
+                wire.Add(MakeEdge(to3(s2), to3(t2)).Edge())
+        face = MakeFace(wire.Wire(), True).Face()
+        return MakePrism(face, gp_Vec(axis[0] * h, axis[1] * h, axis[2] * h)).Shape(), True
     if kind == "FILLET":
         # Trimmed cylindrical patch: u = arc angle [u_min, u_max], v = axial extent.
         (Geom_CylindricalSurface,) = _imp("Geom", "Geom_CylindricalSurface")

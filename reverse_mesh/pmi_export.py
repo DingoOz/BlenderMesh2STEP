@@ -39,6 +39,14 @@ def feature_dimensions(feat):
         d = {"size_x": 2.0 * p["hx"], "size_y": 2.0 * p["hy"], "size_z": 2.0 * p["hz"]}
     elif kind == "PLANE":
         d = {"extent_u": 2.0 * p["half_u"], "extent_v": 2.0 * p["half_v"]}
+    elif kind == "EXTRUDE":
+        try:
+            from .fitting import profile as profile2d
+        except ImportError:                  # standalone (pure-Python tests)
+            from fitting import profile as profile2d
+        d = {"height": p["height"],
+             "profile_area": profile2d.profile_area(p["profile"]),
+             "profile_perimeter": profile2d.profile_perimeter(p["profile"])}
     if p.get("thread_spec"):
         d["thread"] = p["thread_spec"]
     return {k: (round(v, 6) if isinstance(v, (int, float)) else v) for k, v in d.items()}

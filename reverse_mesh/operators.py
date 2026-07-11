@@ -11,7 +11,8 @@ import bmesh
 import bpy
 import numpy as np
 from bpy.app.handlers import persistent
-from bpy.props import BoolProperty, EnumProperty, FloatProperty, StringProperty
+from bpy.props import (BoolProperty, EnumProperty, FloatProperty, IntProperty,
+                       StringProperty)
 from bpy.types import Operator
 from bpy_extras.io_utils import ExportHelper
 from mathutils import Matrix, Vector
@@ -48,13 +49,25 @@ def ensure_occt_on_path():
 
 def _region_from_faces(faces, mw, nmat):
     """Build a world-space :class:`Region` from a list of bmesh faces."""
-    verts = {v for f in faces for v in f.verts}
-    points = np.array([tuple(mw @ v.co) for v in verts], dtype=float)
+    index = {}
+    points = []
+    face_verts = []
+    for f in faces:
+        idxs = []
+        for v in f.verts:
+            k = index.get(v)
+            if k is None:
+                k = index[v] = len(points)
+                points.append(tuple(mw @ v.co))
+            idxs.append(k)
+        face_verts.append(tuple(idxs))
+    points = np.array(points, dtype=float)
     face_points = np.array([tuple(mw @ f.calc_center_median()) for f in faces], dtype=float)
     face_normals = np.array(
         [tuple((nmat @ f.normal).normalized()) for f in faces], dtype=float
     )
-    return Region(points=points, face_points=face_points, face_normals=face_normals)
+    return Region(points=points, face_points=face_points, face_normals=face_normals,
+                  face_verts=face_verts)
 
 
 def _selected_faces(obj):
@@ -1137,6 +1150,8 @@ class REVERSE_OT_add_primitive(Operator):
                                 unit="LENGTH")
     minor_radius: FloatProperty(name="Minor radius", min=1e-6, default=0.25,
                                 unit="LENGTH")
+    sides: IntProperty(name="Sides", min=3, max=64, default=6,
+                       description="Profile side count for an extruded N-gon prism")
     hx: FloatProperty(name="Half X", min=1e-6, default=1.0, unit="LENGTH")
     hy: FloatProperty(name="Half Y", min=1e-6, default=1.0, unit="LENGTH")
     hz: FloatProperty(name="Half Z", min=1e-6, default=1.0, unit="LENGTH")
@@ -1149,6 +1164,8 @@ class REVERSE_OT_add_primitive(Operator):
         layout = self.layout
         layout.use_property_split = True
         layout.prop(self, "kind")
+        if self.kind == "EXTRUDE":
+            layout.prop(self, "sides")
         for key, _label in forward.PARAM_FIELDS[self.kind]:
             layout.prop(self, key)
 
@@ -1156,11 +1173,15 @@ class REVERSE_OT_add_primitive(Operator):
         # Default the kind from the Build panel's selector unless set explicitly.
         if not self.properties.is_property_set("kind"):
             self.kind = context.scene.reverse.build_primitive_type
+        if not self.properties.is_property_set("sides"):
+            self.sides = context.scene.reverse.build_extrude_sides
         return self.execute(context)
 
     def execute(self, context):
         settings = context.scene.reverse
         dims = {key: getattr(self, key) for key, _label in forward.PARAM_FIELDS[self.kind]}
+        if self.kind == "EXTRUDE":
+            dims["sides"] = self.sides
         if self.kind == "CONE" and dims["radius1"] <= 0.0 and dims["radius2"] <= 0.0:
             self.report({"WARNING"}, "Cone needs at least one non-zero radius")
             return {"CANCELLED"}
@@ -1262,6 +1283,11 @@ class REVERSE_OT_bake_scale(Operator):
         for key in _PARAM_KINDS[kind]["lengths"]:
             if key in new:
                 new[key] = float(new[key]) * factor
+        if kind == "EXTRUDE" and "profile" in new:
+            new["profile"] = [
+                [float(r[0])] + [float(x) * factor for x in list(r)[1:7]] + [float(r[7])]
+                for r in new["profile"]
+            ]
         obj["reverse"] = new
         obj.scale = (1.0, 1.0, 1.0)
         # matrix_world is lazily evaluated — flush the scale change before the
@@ -1299,6 +1325,10 @@ _PARAM_KINDS = {
               "lengths": ["major_radius", "minor_radius"]},
     "FILLET": {"points": ["base"], "dirs": ["axis", "ref"],
                "lengths": ["radius", "height"]},
+    # EXTRUDE's 2D profile coordinates are lengths in the (xdir, axis×xdir)
+    # frame — scaled with the object, handled specially in _feature_from_object.
+    "EXTRUDE": {"points": ["base"], "dirs": ["axis", "xdir"],
+                "lengths": ["height", "radius"]},
 }
 
 
@@ -1377,6 +1407,14 @@ def _feature_from_object(obj, user_scale):
     for key in ("u_min", "u_max"):          # fillet arc angles — invariant under the frame
         if key in data.keys():
             params[key] = float(data[key])
+    if kind == "EXTRUDE" and "profile" in data.keys():
+        k = obj_scale * s
+        params["profile"] = [
+            [float(row[0]), float(row[1]) * k, float(row[2]) * k,
+             float(row[3]) * k, float(row[4]) * k,
+             float(row[5]) * k, float(row[6]) * k, float(row[7])]
+            for row in data["profile"]
+        ]
     for key in _METADATA_KEYS:
         if key in data.keys():
             params[key] = data[key]

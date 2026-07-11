@@ -1,6 +1,6 @@
 # Reverse — Mesh to Parametric (Blender extension)
 
-Fit clean analytic CAD primitives — **plane, box, cylinder, cone, sphere, torus**
+Fit clean analytic CAD primitives — **plane, box, cylinder, cone, sphere, torus, extruded profile**
 (the standard analytic-surface set, plus an oriented box for cuboid parts) — to
 selected regions of a mesh, in the semi-automatic, human-in-the-loop style of the
 [Reverse](https://github.com/nico-schluter/Reverse) Fusion 360 add-in.
@@ -131,6 +131,7 @@ kernel-grade writer), the exporter can use OpenCASCADE if it's installed. It is
 | Cylinder  | Axis from SVD of face normals (they avoid the axis), then a 2D Kåsa circle fit in the perpendicular plane |
 | Cone      | Apex from the linear condition `(p − apex)·n = 0`; axis from the plane the normals trace; half-angle from radial-vs-axial slope |
 | Torus     | Axis seeded by PCA + local angular refinement; centre from the region centroid; major/minor radii by linear least squares per candidate axis |
+| Extrude   | Axis from the face-normal ∥/⊥ criterion (candidates tried in score order); profile from side faces ruled along the axis, chained into a closed loop and segmented into lines + arcs by seed-and-grow circle fitting |
 
 Using **face normals** (available in Edit Mode) lets us solve the axis directly,
 avoiding the brute-force orientation search the original Fusion add-in needs.

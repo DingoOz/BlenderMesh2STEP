@@ -132,6 +132,56 @@ def _check(name, ok, detail=""):
     return ok
 
 
+
+def _prism_region(loop2d, height, rot=None, offset=(0, 0, 0)):
+    """Region for a prism over the closed CCW 2D loop: side quads + n-gon caps."""
+    loop2d = np.asarray(loop2d, dtype=float)
+    m = len(loop2d)
+    rot = np.eye(3) if rot is None else np.asarray(rot, dtype=float)
+    offset = np.asarray(offset, dtype=float)
+    xf = lambda p: rot @ p + offset
+    bottom = [xf(np.array([u, v, 0.0])) for u, v in loop2d]
+    top = [xf(np.array([u, v, height])) for u, v in loop2d]
+    points = np.array(bottom + top)
+    fp, fn, fv = [], [], []
+    for i in range(m):
+        j = (i + 1) % m
+        quad = [i, j, m + j, m + i]
+        d = loop2d[j] - loop2d[i]
+        n2 = np.array([d[1], -d[0], 0.0])
+        n2 /= np.linalg.norm(n2)
+        fp.append(points[quad].mean(axis=0))
+        fn.append(rot @ n2)
+        fv.append(tuple(quad))
+    fp.append(np.array(bottom).mean(axis=0)); fn.append(rot @ np.array([0.0, 0.0, -1.0]))
+    fv.append(tuple(range(m)))
+    fp.append(np.array(top).mean(axis=0)); fn.append(rot @ np.array([0.0, 0.0, 1.0]))
+    fv.append(tuple(range(m, 2 * m)))
+    return Region(points=points, face_points=np.array(fp),
+                  face_normals=np.array(fn), face_verts=fv)
+
+
+def _rot(axis, angle):
+    axis = np.asarray(axis, dtype=float); axis /= np.linalg.norm(axis)
+    c, s = np.cos(angle), np.sin(angle)
+    x, y, z = axis
+    return np.array([[c + x*x*(1-c), x*y*(1-c) - z*s, x*z*(1-c) + y*s],
+                     [y*x*(1-c) + z*s, c + y*y*(1-c), y*z*(1-c) - x*s],
+                     [z*x*(1-c) - y*s, z*y*(1-c) + x*s, c + z*z*(1-c)]])
+
+
+def _stadium(length=4.0, radius=1.0, arc_segs=16):
+    pts = [(-length/2, -radius), (length/2, -radius)]
+    for k in range(1, arc_segs):
+        a = -np.pi/2 + np.pi * k / arc_segs
+        pts.append((length/2 + radius*np.cos(a), radius*np.sin(a)))
+    pts += [(length/2, radius), (-length/2, radius)]
+    for k in range(1, arc_segs):
+        a = np.pi/2 + np.pi * k / arc_segs
+        pts.append((-length/2 + radius*np.cos(a), radius*np.sin(a)))
+    return pts
+
+
 def main():
     results = []
 
@@ -302,6 +352,53 @@ def main():
                           and abs(info["radius"] - bolt_r) < 1e-6, f"{kind} {info}"))
     lin_kind, _ = classify_arrangement([(0, 0, 0), (2, 0, 0), (4, 0, 0), (6, 0, 0)], (0, 0, 1))
     results.append(_check("pattern linear", lin_kind == "LINEAR", f"got {lin_kind}"))
+
+
+    # Extrude (prism) fits: L-bracket (lines), rotated, stadium slot (arcs).
+    from fitting import fit_extrude
+    from fitting import profile as profile2d
+    lshape = [(0, 0), (4, 0), (4, 1), (1, 1), (1, 3), (0, 3)]
+    r = fit_extrude(_prism_region(lshape, 2.0))
+    results.append(_check("extrude L prism", r is not None and r.kind == "EXTRUDE"
+                          and r.rms < 1e-9 and abs(r.params["height"] - 2.0) < 1e-9
+                          and len(r.params["profile"]) == 6,
+                          r.summary if r else "None"))
+    if r is not None:
+        area = profile2d.profile_area(r.params["profile"])
+        results.append(_check("extrude L area", abs(area - 6.0) < 1e-9, f"area {area}"))
+    rr = fit_extrude(_prism_region(lshape, 2.0, rot=_rot([1, 2, 3], 0.7),
+                                   offset=(5, -3, 2)))
+    results.append(_check("extrude rotated L", rr is not None and rr.rms < 1e-9
+                          and abs(abs(np.dot(rr.params["axis"],
+                                             _rot([1, 2, 3], 0.7) @ [0, 0, 1])) - 1) < 1e-9,
+                          rr.summary if rr else "None"))
+    rs = fit_extrude(_prism_region(_stadium(), 1.5))
+    ok = rs is not None and rs.rms < 1e-9
+    if ok:
+        prof = np.asarray(rs.params["profile"])
+        n_arc = int(np.sum(prof[:, 0] == 1.0))
+        area = profile2d.profile_area(prof)
+        ok = n_arc == 2 and len(prof) == 4 and abs(area - (8 + math.pi)) < 1e-9
+    results.append(_check("extrude stadium (2 lines + 2 arcs)", ok,
+                          rs.summary if rs else "None"))
+    # AUTO Occam: hexagon prism → EXTRUDE (its 12 vertices lie exactly on a
+    # sphere, which the face-centroid gate must reject); cube → BOX;
+    # 24-gon prism (intended cylinder) → CYLINDER; full circle → not EXTRUDE.
+    hexa = [(math.cos(2*math.pi*i/6), math.sin(2*math.pi*i/6)) for i in range(6)]
+    results.append(_check("AUTO hexagon prism → extrude",
+                          fit_auto(_prism_region(hexa, 2.0)).kind == "EXTRUDE"))
+    results.append(_check("AUTO cube → box",
+                          fit_auto(_prism_region([(-1, -1), (1, -1), (1, 1), (-1, 1)],
+                                                 2.0)).kind == "BOX"))
+    poly24 = [(math.cos(2*math.pi*i/24), math.sin(2*math.pi*i/24)) for i in range(24)]
+    results.append(_check("AUTO 24-gon prism → cylinder",
+                          fit_auto(_prism_region(poly24, 2.0)).kind == "CYLINDER"))
+    results.append(_check("extrude declines full circle",
+                          fit_extrude(_prism_region(poly24, 2.0)) is None))
+    # Regions without face-vertex topology can't fit an extrusion.
+    pts, nrm = _sample_cylinder()
+    results.append(_check("extrude needs topology",
+                          fit_extrude(_region(pts, nrm)) is None))
 
     print(f"\n{sum(results)}/{len(results)} passed")
     sys.exit(0 if all(results) else 1)

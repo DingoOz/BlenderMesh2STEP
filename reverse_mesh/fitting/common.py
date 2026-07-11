@@ -31,6 +31,10 @@ class Region:
     points: np.ndarray          # (P, 3)
     face_points: np.ndarray     # (F, 3)
     face_normals: np.ndarray    # (F, 3)
+    # Optional per-face vertex indices into ``points`` (ragged list of tuples).
+    # Needed only by fitters that reconstruct topology (e.g. the extrude
+    # profile); Regions built without it simply can't fit those kinds.
+    face_verts: list | None = None
 
     @classmethod
     def from_points(cls, points: np.ndarray, normals: np.ndarray | None = None) -> "Region":

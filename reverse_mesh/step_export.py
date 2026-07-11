@@ -31,6 +31,7 @@ DEFAULT_COLORS = {
     "CONE": (0.85, 0.55, 0.30),
     "SPHERE": (0.50, 0.80, 0.40),
     "TORUS": (0.80, 0.40, 0.62),
+    "EXTRUDE": (0.45, 0.70, 0.70),
     "MESH_PATCH": (0.75, 0.72, 0.55),
 }
 
@@ -458,6 +459,103 @@ def _box_item(w, p):
                  f"{w.closed_shell(faces)})"), True
 
 
+def _extrude_item(w, p):
+    """Extruded planar profile → closed B-rep solid.
+
+    The profile is an ``(S, 8)`` row list (see :mod:`fitting.profile`): LINE
+    rows become planar side faces, ARC rows become trimmed cylindrical faces;
+    the caps are planar faces bounded by the full mixed line/arc loop. Edges
+    are built once and shared between the side faces and the caps, so the
+    shell is genuinely closed.
+    """
+    axis = _unit(tuple(p["axis"]))
+    e1 = tuple(float(c) for c in p["xdir"])
+    e1 = _unit(_sub(e1, _scale(axis, _dot(e1, axis))))
+    e2 = _cross(axis, e1)
+    base = tuple(float(c) for c in p["base"])
+    h = float(p["height"])
+    rows = [[float(x) for x in row] for row in p["profile"]]
+    n = len(rows)
+
+    def to3(uv, t):
+        pt = _add(base, _add(_scale(e1, uv[0]), _scale(e2, uv[1])))
+        return _add(pt, _scale(axis, t))
+
+    starts = [(r[1], r[2]) for r in rows]
+    v_bot = [w.vertex(to3(s, 0.0)) for s in starts]
+    v_top = [w.vertex(to3(s, h)) for s in starts]
+
+    # One bottom + one top edge per profile segment, one vertical per junction.
+    e_bot, e_top = [], []
+    for i, r in enumerate(rows):
+        j = (i + 1) % n
+        s, t2 = (r[1], r[2]), (r[3], r[4])
+        if r[0] == 1.0:                                     # ARC
+            c = (r[5], r[6])
+            radius = math.hypot(s[0] - c[0], s[1] - c[1])
+            ccw = r[7] > 0.5
+            # The circle's parametrisation runs CCW about its axis; picking the
+            # axis by the arc's turn direction makes start→end the positive
+            # direction, so the edge can stay same_sense.
+            circ_axis = axis if ccw else _scale(axis, -1.0)
+            ref = _unit(_sub(to3(s, 0.0), to3(c, 0.0)))
+            crv_b = w.circle(w.axis2(to3(c, 0.0), circ_axis, ref), radius)
+            crv_t = w.circle(w.axis2(to3(c, h), circ_axis, ref), radius)
+        else:                                               # LINE
+            d3 = _unit(_sub(to3(t2, 0.0), to3(s, 0.0)))
+            crv_b = w.line(to3(s, 0.0), d3)
+            crv_t = w.line(to3(s, h), d3)
+        e_bot.append(w.edge_curve(v_bot[i], v_bot[j], crv_b, True))
+        e_top.append(w.edge_curve(v_top[i], v_top[j], crv_t, True))
+    e_vert = [w.edge_curve(v_bot[i], v_top[i], w.line(to3(starts[i], 0.0), axis), True)
+              for i in range(n)]
+
+    faces = []
+    for i, r in enumerate(rows):
+        j = (i + 1) % n
+        loop = w.edge_loop([
+            w.oriented_edge(e_bot[i], True),
+            w.oriented_edge(e_vert[j], True),
+            w.oriented_edge(e_top[i], False),
+            w.oriented_edge(e_vert[i], False),
+        ])
+        bound = w.face_outer_bound(loop, True)
+        s, t2 = (r[1], r[2]), (r[3], r[4])
+        if r[0] == 1.0:
+            c = (r[5], r[6])
+            radius = math.hypot(s[0] - c[0], s[1] - c[1])
+            ccw = r[7] > 0.5
+            ref = _unit(_sub(to3(s, 0.0), to3(c, 0.0)))
+            surf = w.add(f"CYLINDRICAL_SURFACE('',"
+                         f"{w.axis2(to3(c, 0.0), axis, ref)},{_num(radius)})")
+            # A convex (CCW) arc's material lies inside the cylinder → the
+            # radially-outward surface normal is the face normal; a concave
+            # arc's material is outside → flip.
+            faces.append(w.advanced_face("side", [bound], surf, ccw))
+        else:
+            d2 = (t2[0] - s[0], t2[1] - s[1])
+            out2 = (d2[1], -d2[0])                          # outward for a CCW loop
+            normal = _unit(_add(_scale(e1, out2[0]), _scale(e2, out2[1])))
+            d3 = _unit(_sub(to3(t2, 0.0), to3(s, 0.0)))
+            surf = w.add(f"PLANE('',{w.axis2(to3(s, 0.0), normal, d3)})")
+            faces.append(w.advanced_face("side", [bound], surf, True))
+
+    # Caps: the full profile loop on each end plane. Bottom outward normal is
+    # −axis: surface stays +axis and the face flips (same_sense False), with
+    # the loop reversed, mirroring the cylinder cap convention.
+    loop_bot = w.edge_loop([w.oriented_edge(e_bot[i], False) for i in reversed(range(n))])
+    pl_bot = w.add(f"PLANE('',{w.axis2(base, axis, e1)})")
+    faces.append(w.advanced_face("cap", [w.face_outer_bound(loop_bot, True)],
+                                 pl_bot, False))
+    loop_top = w.edge_loop([w.oriented_edge(e_top[i], True) for i in range(n)])
+    pl_top = w.add(f"PLANE('',{w.axis2(_add(base, _scale(axis, h)), axis, e1)})")
+    faces.append(w.advanced_face("cap", [w.face_outer_bound(loop_top, True)],
+                                 pl_top, True))
+
+    return w.add(f"MANIFOLD_SOLID_BREP('{_solid_name('extrude', p)}',"
+                 f"{w.closed_shell(faces)})"), True
+
+
 def _mesh_patch_item(w, p):
     """Leftover mesh region → faceted planar triangles in a surface model.
 
@@ -505,6 +603,7 @@ _BUILDERS = {
     "SPHERE": _sphere_item,
     "TORUS": _torus_item,
     "FILLET": _fillet_item,
+    "EXTRUDE": _extrude_item,
     "MESH_PATCH": _mesh_patch_item,
 }
 
