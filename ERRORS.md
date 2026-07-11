@@ -169,3 +169,13 @@
 - **Root cause:** The blend pass matched candidate edges only by distance-to-line of their endpoints; a closed edge's coincident endpoints trivially pass. `do_bool` was extended with `or fillet_feats`, changing the separate-solids path.
 - **Fix applied:** Edge candidates must have two distinct endpoints (`> 1e-6·r` apart); blends only apply when merge/cutters/stitch already produce a single base body.
 - **Prevention rule:** Never feed edges/faces into OCCT modeling algorithms without validating their topology class first (closed, degenerate, seam); and never let an additive option widen `do_bool`-style mode switches — gate new behaviour inside the existing mode.
+
+### Plücker axis solve degenerate on lathe centroids — 2026-07-12
+
+- **Severity:** High
+- **Category:** Logic
+- **File(s):** `reverse_mesh/fitting/primitives.py`
+- **Pattern:** Building a linear system from samples that are individually valid but *collectively concurrent* — on a two-station lathe tessellation, every face-centroid normal line passes exactly through the body centre (wall centroids lie on the mid-plane, cap centroids on the axis), so all Plücker moments vanish and the null space becomes 3-dimensional; the returned axis is whatever LAPACK happens to pick. Synthetic tests passed by luck.
+- **Root cause:** `fit_revolve` sampled each face's normal line at the face centroid only.
+- **Fix applied:** The system now pairs every face *vertex* with its face normal (vertices sit off the mid-plane, breaking the concurrency), and the moment terms are centred for conditioning.
+- **Prevention rule:** When solving for geometry from a homogeneous linear system, check the null-space dimension assumption against symmetric sample configurations (rings, mirror-symmetric centroids); prefer sampling at vertices over centroids when centroids can be collinear/concurrent by symmetry.

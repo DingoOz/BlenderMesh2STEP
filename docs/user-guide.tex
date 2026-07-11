@@ -190,6 +190,7 @@ Sphere   & centre, radius                   & \\
 Torus    & axis, major + minor radius       & best on full rings \\
 Fillet   & edge round $\to$ partial cylinder & radius + arc extent; arcs $<330^\circ$ \\
 Extrude  & prism: planar line/arc profile + height & select the whole prism incl.\ caps \\
+Revolve  & lathe part: line/arc profile $\times$ 360° & explicit only; never chosen by Auto \\
 Auto     & best of the above                & normal-agreement gate + simplicity tie-break \\
 \bottomrule
 \end{tabular}
@@ -203,6 +204,16 @@ end caps — and the fitter recovers the axis, the height, and an exact
 line/arc profile (tangent arcs such as slot ends are recognised as true
 arcs, not chains of facets). It exports as a genuine B-rep solid on both
 backends and can act as a \emph{Subtract} cutter (a milled pocket).
+
+The \textbf{Revolve} fit recovers lathe parts: select the whole revolved
+body and the fitter solves the rotation axis directly from the surface
+normals, then reconstructs the (radius, height) profile — lines and arcs,
+closed along the axis when the solid touches it. Washers, bushings, pulleys
+and ball-end pins export as exact solids of revolution on both backends
+(cylindrical, conical, planar, toroidal and spherical zones), and a
+subtractive revolve cuts grooves. Because \emph{every} quadric is a surface
+of revolution, Revolve is never chosen by \ui{Auto-detect} — pick it
+explicitly.
 
 \ui{Auto-detect} tries every primitive and keeps the best fit, preferring the
 \emph{simplest} primitive when several explain the selection equally well
@@ -307,10 +318,13 @@ renames of the session list.
 \label{sec:forward}
 
 The \ui{Build} panel adds solids that are STEP-exportable by construction:
-\textbf{Box, Cylinder, Cone (frustum), Sphere, Torus, Extrude (N-gon prism)}.
-The exact analytic parameters are stored on the object; the viewport mesh is
-just a preview tessellation. For the extruded prism, pick the side count when
-adding; the circumradius and height stay live-editable and the profile follows.
+\textbf{Box, Cylinder, Cone (frustum), Sphere, Torus, Extrude (N-gon prism),
+Ring (washer)}. The exact analytic parameters are stored on the object; the
+viewport mesh is just a preview tessellation. For the extruded prism, pick
+the side count when adding; the circumradius and height stay live-editable
+and the profile follows. The ring is a rectangular section revolved about
+the axis (washers, spacers, bushings) with live inner/outer radius and
+height.
 
 \begin{itemize}[nosep]
   \item Pick a primitive and a \ui{Role} (Add or Subtract --- a forward-built

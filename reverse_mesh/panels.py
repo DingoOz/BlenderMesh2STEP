@@ -33,6 +33,7 @@ class REVERSE_UL_features(UIList):
             "SPHERE": "MESH_UVSPHERE",
             "TORUS": "MESH_TORUS",
             "EXTRUDE": "MOD_SOLIDIFY",
+            "REVOLVE": "MOD_SCREW",
         }
         row = layout.row(align=True)
         op_icon = "REMOVE" if item.operation == "SUBTRACT" else "ADD"
@@ -82,7 +83,8 @@ class REVERSE_PT_build(Panel):
 
         icon_for = {"BOX": "MESH_CUBE", "CYLINDER": "MESH_CYLINDER",
                     "CONE": "MESH_CONE", "SPHERE": "MESH_UVSPHERE",
-                    "TORUS": "MESH_TORUS", "EXTRUDE": "MOD_SOLIDIFY"}
+                    "TORUS": "MESH_TORUS", "EXTRUDE": "MOD_SOLIDIFY",
+                    "REVOLVE": "MOD_SCREW"}
         layout.operator("reverse.add_primitive", text="Add Primitive",
                         icon=icon_for.get(settings.build_primitive_type, "PLUS"))
 
@@ -92,9 +94,11 @@ class REVERSE_PT_build(Panel):
             return
         kind = data["kind"]
         fields = forward.PARAM_FIELDS.get(kind)
-        # A *fitted* extrusion has an arbitrary measured profile (no 'sides');
-        # its radius is not a parameter, so offer no dimension editor.
+        # A *fitted* extrusion/revolve has an arbitrary measured profile; its
+        # preset dimensions are not parameters, so offer no dimension editor.
         if kind == "EXTRUDE" and "sides" not in data.keys():
+            fields = None
+        if kind == "REVOLVE" and "radius1" not in data.keys():
             fields = None
 
         box = layout.box()

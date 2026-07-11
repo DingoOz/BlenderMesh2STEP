@@ -47,6 +47,12 @@ def feature_dimensions(feat):
         d = {"height": p["height"],
              "profile_area": profile2d.profile_area(p["profile"]),
              "profile_perimeter": profile2d.profile_perimeter(p["profile"])}
+    elif kind == "REVOLVE":
+        rows = [[float(x) for x in row] for row in p["profile"]]
+        r_max = max(max(r[1], r[3]) for r in rows)
+        v_all = [r[2] for r in rows] + [r[4] for r in rows]
+        d = {"max_radius": r_max, "max_diameter": 2.0 * r_max,
+             "axial_extent": max(v_all) - min(v_all)}
     if p.get("thread_spec"):
         d["thread"] = p["thread_spec"]
     return {k: (round(v, 6) if isinstance(v, (int, float)) else v) for k, v in d.items()}

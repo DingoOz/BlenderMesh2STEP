@@ -75,6 +75,7 @@ Blender-authored meshes. The result is a true B-rep solid, not an approximation.
 | **Torus** | axis, major + minor radius | PCA seed + angular refinement |
 | **Fillet** | edge round → partial cylinder (radius + arc) | circle fit + angular-extent recovery |
 | **Extrude** | prism: planar line/arc profile + height | axis from normals, profile from ruled side faces |
+| **Revolve** | lathe part: line/arc profile × 360° | axis from a linear Plücker solve over the surface normals |
 | **Auto** | picks the best fit | normal agreement + Occam tie-break |
 
 On clean meshes these fits land at **~1e-8** RMS — effectively exact.

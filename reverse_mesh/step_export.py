@@ -32,6 +32,7 @@ DEFAULT_COLORS = {
     "SPHERE": (0.50, 0.80, 0.40),
     "TORUS": (0.80, 0.40, 0.62),
     "EXTRUDE": (0.45, 0.70, 0.70),
+    "REVOLVE": (0.72, 0.55, 0.75),
     "MESH_PATCH": (0.75, 0.72, 0.55),
 }
 
@@ -556,6 +557,106 @@ def _extrude_item(w, p):
                  f"{w.closed_shell(faces)})"), True
 
 
+def _revolve_item(w, p):
+    """Solid of revolution → closed B-rep of full-revolution surface bands.
+
+    The (S, 8) profile lives in the (u = radius, v = axial) half-plane, CCW.
+    Each row revolves into one band: LINE rows become cylindrical (u const),
+    planar-annulus (v const) or conical faces; ARC rows become toroidal
+    (center off axis) or spherical (center on axis) zones. Bands share full
+    latitude circles at the stations and a seam meridian edge each; stations
+    on the axis are poles with no circle. Synthetic closing rows that run
+    along the axis (u ≈ 0 at both ends) generate no geometry.
+    """
+    axis = _unit(tuple(p["axis"]))
+    xref = _perp(axis)
+    yref = _cross(axis, xref)
+    base = tuple(float(c) for c in p["base"])
+    rows = [[float(x) for x in row] for row in p["profile"]]
+    n = len(rows)
+    u_eps = 1e-9 * (1.0 + max(abs(r[1]) + abs(r[3]) for r in rows))
+
+    def to3(uv):
+        return _add(base, _add(_scale(xref, uv[0]), _scale(axis, uv[1])))
+
+    stations = [(r[1], r[2]) for r in rows]           # row i starts at station i
+    verts = [w.vertex(to3(st)) for st in stations]
+
+    circle_cache = {}
+
+    def station_circle(i):
+        """Full latitude circle edge at station i (None on the axis)."""
+        if i not in circle_cache:
+            u, v = stations[i]
+            if u <= u_eps:
+                circle_cache[i] = None
+            else:
+                center = _add(base, _scale(axis, v))
+                crv = w.circle(w.axis2(center, axis, xref), u)
+                circle_cache[i] = w.edge_curve(verts[i], verts[i], crv, True)
+        return circle_cache[i]
+
+    faces = []
+    for i, r in enumerate(rows):
+        j = (i + 1) % n
+        (u0, v0), (u1, v1) = stations[i], stations[j]
+        if u0 <= u_eps and u1 <= u_eps:
+            continue                                   # runs along the axis
+        du, dv = u1 - u0, v1 - v0
+
+        # Seam edge along the profile curve, at angle 0 (the xref meridian).
+        if r[0] == 1.0:                                # ARC row
+            cu, cv = r[5], r[6]
+            ccw = r[7] > 0.5
+            c3 = to3((cu, cv))
+            r_t = math.hypot(u0 - cu, v0 - cv)
+            circ_axis = _scale(yref, -1.0) if ccw else yref
+            ref = _unit(_sub(to3((u0, v0)), c3))
+            seam = w.edge_curve(verts[i], verts[j],
+                                w.circle(w.axis2(c3, circ_axis, ref), r_t), True)
+            if abs(cu) <= u_eps:                       # sphere zone
+                surf = w.add(f"SPHERICAL_SURFACE('',"
+                             f"{w.axis2(to3((0.0, cv)), axis, xref)},{_num(r_t)})")
+            else:                                      # torus zone
+                surf = w.add(f"TOROIDAL_SURFACE('',"
+                             f"{w.axis2(to3((0.0, cv)), axis, xref)},"
+                             f"{_num(cu)},{_num(r_t)})")
+            outward = ccw
+        else:                                          # LINE row
+            p0, p1 = to3((u0, v0)), to3((u1, v1))
+            seam = w.edge_curve(verts[i], verts[j], w.line(p0, _unit(_sub(p1, p0))), True)
+            ln = math.hypot(du, dv)
+            n_u, n_v = dv / ln, -du / ln               # outward normal (CCW loop)
+            if abs(du) <= u_eps:                       # cylinder band
+                surf = w.add(f"CYLINDRICAL_SURFACE('',"
+                             f"{w.axis2(to3((0.0, v0)), axis, xref)},{_num(u0)})")
+                outward = n_u > 0
+            elif abs(dv) <= u_eps:                     # planar annulus / disc
+                surf = w.add(f"PLANE('',{w.axis2(to3((0.0, v0)), axis, xref)})")
+                outward = n_v > 0
+            else:                                      # cone band
+                # Radius grows along the placement axis (logged STEP defect):
+                # point it toward increasing radius, semi-angle positive.
+                grow = axis if (du / dv) > 0 else _scale(axis, -1.0)
+                surf = w.add(f"CONICAL_SURFACE('',"
+                             f"{w.axis2(to3((0.0, v0)), grow, xref)},"
+                             f"{_num(u0)},{_num(math.atan(abs(du / dv)))})")
+                outward = n_u > 0
+        # The band loop [circle_i →, seam →, circle_j ←, seam ←] is CCW with
+        # respect to the *outward* normal for every band type: at the seam
+        # corner, cross(circle_dir, seam_dir) is exactly the revolved profile
+        # outward normal. Orientation therefore lives entirely in same_sense.
+        c_i, c_j = station_circle(i), station_circle(j)
+        std = [(c_i, True), (seam, True), (c_j, False), (seam, False)]
+        std = [(e, f) for e, f in std if e is not None]
+        loop = w.edge_loop([w.oriented_edge(e, f) for e, f in std])
+        faces.append(w.advanced_face("rev", [w.face_outer_bound(loop, True)],
+                                     surf, outward))
+
+    return w.add(f"MANIFOLD_SOLID_BREP('{_solid_name('revolve', p)}',"
+                 f"{w.closed_shell(faces)})"), True
+
+
 def _mesh_patch_item(w, p):
     """Leftover mesh region → faceted planar triangles in a surface model.
 
@@ -604,6 +705,7 @@ _BUILDERS = {
     "TORUS": _torus_item,
     "FILLET": _fillet_item,
     "EXTRUDE": _extrude_item,
+    "REVOLVE": _revolve_item,
     "MESH_PATCH": _mesh_patch_item,
 }
 

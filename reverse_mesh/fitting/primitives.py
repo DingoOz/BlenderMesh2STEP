@@ -48,6 +48,13 @@ def summarize(kind: str, p: dict) -> str:
         n_line = len(rows) - n_arc
         segs = f"{n_line}L" + (f"+{n_arc}A" if n_arc else "")
         return f"Extrude · {segs} · h={p['height']:.4g}"
+    if kind == "REVOLVE":
+        rows = np.asarray(p["profile"], dtype=float)
+        n_arc = int(np.sum(rows[:, 0] == profile2d.ARC))
+        n_line = len(rows) - n_arc
+        segs = f"{n_line}L" + (f"+{n_arc}A" if n_arc else "")
+        r_max = float(np.max(rows[:, [1, 3]]))
+        return f"Revolve · {segs} · r≤{r_max:.4g}"
     return kind
 
 
@@ -662,6 +669,144 @@ def fit_extrude(region: Region) -> FitResult | None:
                      summary=summarize("EXTRUDE", params))
 
 
+def fit_revolve(region: Region) -> FitResult | None:
+    """Solid of revolution: axis + a closed line/arc profile in (radius, z).
+
+    The axis comes from a linear (Plücker) solve — every surface normal of a
+    revolved surface, taken as a line, intersects the axis, which is linear in
+    the axis line's 6 Plücker coordinates. The profile is reconstructed like
+    the extrude's: every face of a revolved tessellation projects to exactly
+    two distinct (rho, w) stations, giving segments that chain into a closed
+    half-plane loop (closed along the axis itself when the solid touches it).
+
+    REVOLVE is deliberately not part of AUTO: every quadric is a surface of
+    revolution, so it would shadow the simpler primitives. Pick it explicitly.
+    Returns None for full-circle profiles (that's a torus).
+    """
+    points = region.points
+    normals = region.face_normals
+    fverts = region.face_verts
+    if fverts is None or len(fverts) < 4 or len(points) < 8:
+        return None
+    if len(normals) != len(fverts) or not np.any(normals):
+        return None
+    scale = region_scale(points)
+
+    # Plücker axis solve: line (d, m) with m = a×d meets the normal line at
+    # p_i with direction n_i iff  n_i·m + (p_i×n_i)·d = 0  — linear in (m, d).
+    fp = region.face_points if len(region.face_points) == len(fverts) else None
+    if fp is None:
+        return None
+    nu = normals / np.clip(np.linalg.norm(normals, axis=1, keepdims=True), 1e-12, None)
+    # Sample the normal line at every face *vertex*, not the centroid: on a
+    # two-station lathe tessellation all centroid normal lines pass exactly
+    # through the body centre (wall centroids sit on the mid-plane, cap
+    # centroids on the axis), collapsing the system to a 3-D null space in
+    # which the axis direction is arbitrary. Vertices sit off the mid-plane
+    # and break that concurrency. Centre the moment terms for conditioning.
+    vp = []
+    vn = []
+    for fi, idxs in enumerate(fverts):
+        for vi in idxs:
+            vp.append(points[int(vi)])
+            vn.append(nu[fi])
+    vp = np.asarray(vp)
+    vn = np.asarray(vn)
+    c0 = vp.mean(axis=0)
+    a_mat = np.column_stack([vn, np.cross(vp - c0, vn)])
+    try:
+        _, sv, vh = np.linalg.svd(a_mat, full_matrices=False)
+    except np.linalg.LinAlgError:
+        return None
+    sol = vh[-1]
+    m_vec, d_vec = sol[:3], sol[3:]
+    dn = float(np.linalg.norm(d_vec))
+    if dn < 1e-9:
+        return None                       # no finite axis direction
+    axis = d_vec / dn
+    # Point on the axis (closest to c0), back in world coordinates.
+    a_pt = np.cross(axis, m_vec / dn) + c0
+
+    # (rho, w) half-plane projection.
+    rel = points - a_pt
+    wv = rel @ axis
+    rho = np.linalg.norm(rel - np.outer(wv, axis), axis=1)
+    uv_all = np.column_stack([rho, wv])
+
+    # Every face must project to exactly two distinct stations (ruled along
+    # the rotation) — quads of a lathe tessellation and pole triangles do.
+    tol = 1e-5 * scale
+    segs = []
+    for fi in range(len(fverts)):
+        pts2 = uv_all[np.asarray(fverts[fi], dtype=int)]
+        distinct = [pts2[0]]
+        for q in pts2[1:]:
+            if all(np.linalg.norm(q - dpt) > tol for dpt in distinct):
+                distinct.append(q)
+        if len(distinct) == 1:
+            # Every vertex on one latitude circle: an n-gon cap disc (it has no
+            # centre vertex). Only a face ⊥ axis can span that disc.
+            if abs(float(nu[fi] @ axis)) < 0.99:
+                return None
+            segs.append(((0.0, float(distinct[0][1])), tuple(distinct[0])))
+        elif len(distinct) == 2:
+            segs.append((tuple(distinct[0]), tuple(distinct[1])))
+        else:
+            return None
+
+    loops = profile2d.chain_segments(segs, tol)
+    if not loops:
+        # A solid touching the axis has an unclosed profile whose two loose
+        # ends sit at rho ≈ 0 — close it along the axis.
+        ends = _open_chain_ends(segs, tol)
+        if ends is None or any(e[0] > 10 * tol for e in ends):
+            return None
+        segs.append((ends[0], ends[1]))
+        loops = profile2d.chain_segments(segs, tol)
+    if len(loops) != 1:
+        return None
+    prof = profile2d.segment_loop(loops[0], scale)
+    if prof is None:
+        return None                       # full circle → that's a torus
+
+    d2d = profile2d.distance_to_profile(prof, uv_all)
+    rms, max_err = residual_stats(d2d)
+
+    params = {
+        "base": a_pt,
+        "axis": axis,
+        "profile": prof,
+        "_scale": scale,
+    }
+    return FitResult(kind="REVOLVE", rms=rms, max_error=max_err, params=params,
+                     summary=summarize("REVOLVE", params))
+
+
+def _open_chain_ends(segs, tol):
+    """The two degree-1 endpoints of an almost-closed segment set, or None.
+
+    Duplicate segments (a lathe emits each profile segment once per
+    revolution step) are collapsed before counting degrees, mirroring
+    :func:`profile2d.chain_segments`.
+    """
+    def q(p):
+        return (round(p[0] / tol), round(p[1] / tol))
+
+    uniq = {}
+    for a, b in segs:
+        key = frozenset((q(a), q(b)))
+        if len(key) == 2:
+            uniq[key] = (a, b)
+    counts = {}
+    coords = {}
+    for a, b in uniq.values():
+        for p in (a, b):
+            counts[q(p)] = counts.get(q(p), 0) + 1
+            coords[q(p)] = p
+    ends = [coords[k] for k, c in counts.items() if c == 1]
+    return (ends[0], ends[1]) if len(ends) == 2 else None
+
+
 def predicted_normals(result: FitResult, pts: np.ndarray) -> np.ndarray:
     """Unit surface normals the fitted primitive predicts at ``pts``.
 
@@ -724,6 +869,17 @@ def predicted_normals(result: FitResult, pts: np.ndarray) -> np.ndarray:
         out = np.outer(n2[:, 0], e1) + np.outer(n2[:, 1], e2)
         out[d_cap < d2d] = axis
         return out
+    if result.kind == "REVOLVE":
+        axis = _unit(np.asarray(p["axis"], dtype=float))
+        rel = pts - np.asarray(p["base"], dtype=float)
+        wv = rel @ axis
+        radial = rel - np.outer(wv, axis)
+        rn = np.clip(np.linalg.norm(radial, axis=1, keepdims=True), 1e-12, None)
+        radial_u = radial / rn
+        uv = np.column_stack([rn[:, 0], wv])
+        n2 = profile2d.outward_normals(np.asarray(p["profile"], dtype=float), uv)
+        out = radial_u * n2[:, :1] + np.outer(n2[:, 1], axis)
+        return out / np.clip(np.linalg.norm(out, axis=1, keepdims=True), 1e-12, None)
     raise ValueError(result.kind)
 
 
@@ -772,6 +928,13 @@ def signed_distances(result: FitResult, pts: np.ndarray) -> np.ndarray:
         d2d = profile2d.distance_to_profile(np.asarray(p["profile"], dtype=float), uv)
         d_cap = np.minimum(np.abs(t), np.abs(t - h))
         return np.minimum(d2d, d_cap)      # matches fit_extrude's residual
+    if result.kind == "REVOLVE":
+        axis = _unit(np.asarray(p["axis"], dtype=float))
+        rel = pts - np.asarray(p["base"], dtype=float)
+        wv = rel @ axis
+        rho = np.linalg.norm(rel - np.outer(wv, axis), axis=1)
+        uv = np.column_stack([rho, wv])
+        return profile2d.distance_to_profile(np.asarray(p["profile"], dtype=float), uv)
     raise ValueError(result.kind)
 
 
@@ -798,7 +961,13 @@ FITTERS = {
     "SPHERE": fit_sphere,
     "TORUS": fit_torus,
     "EXTRUDE": fit_extrude,
+    "REVOLVE": fit_revolve,
 }
+
+# Kinds excluded from AUTO: every quadric is a surface of revolution, so
+# REVOLVE would shadow the simpler primitives — it must be chosen explicitly
+# (FILLET is likewise explicit-only, and is not in FITTERS at all).
+_AUTO_EXCLUDED = {"REVOLVE"}
 
 
 # Faces must agree with the predicted surface normal at least this well for a
@@ -851,7 +1020,9 @@ def fit_auto(region: Region, return_candidates: bool = False):
     no primitive fit at all.
     """
     candidates = []
-    for fitter in FITTERS.values():
+    for kind, fitter in FITTERS.items():
+        if kind in _AUTO_EXCLUDED:
+            continue
         try:
             res = fitter(region)
         except np.linalg.LinAlgError:

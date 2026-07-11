@@ -229,6 +229,42 @@ def main():
         fail(f"profile did not follow radius edit: {r_new} != 2.5")
     print("[ok] forward extrude: 8-gon prism built, profile follows radius edit")
 
+    # Revolve (#14a): a closed cylinder mesh fits as a solid of revolution when
+    # chosen explicitly (REVOLVE never participates in AUTO).
+    nr = len(bpy.context.scene.reverse.features)
+    bpy.ops.mesh.primitive_cylinder_add(vertices=32, radius=1.2, depth=2.5,
+                                        location=(0.0, -40.0, 0.0))
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="SELECT")
+    settings.primitive_type = "REVOLVE"
+    if bpy.ops.reverse.fit_selection() != {"FINISHED"}:
+        fail("revolve fit failed")
+    rfeat = bpy.context.scene.reverse.features[nr]
+    if rfeat.kind != "REVOLVE" or rfeat.rms > 1e-6:
+        fail(f"cylinder should fit as REVOLVE, got {rfeat.kind} rms={rfeat.rms}")
+    robj = bpy.data.objects.get(rfeat.object_name)
+    rprof = [list(r) for r in robj["reverse"]["profile"]]
+    if len(rprof) != 4:
+        fail(f"revolve profile should be 4 rows (rect + axis closure), got {len(rprof)}")
+    print(f"[ok] cylinder → {rfeat.summary} rms={rfeat.rms:.2e}")
+    bpy.ops.object.mode_set(mode="OBJECT")
+    settings.primitive_type = "AUTO"
+
+    # Revolve (#14b): forward-built ring (washer) with live radius edit.
+    if bpy.ops.reverse.add_primitive(kind="REVOLVE", radius1=1.0, radius2=2.0,
+                                     height=0.5) != {"FINISHED"}:
+        fail("forward revolve add failed")
+    ring = bpy.context.active_object
+    if ring["reverse"]["kind"] != "REVOLVE" or len(ring["reverse"]["profile"]) != 4:
+        fail("built ring wrong")
+    # Stay below r=2: the unit-scale block later keys on the r=2 cylinder
+    # being the largest CYLINDRICAL_SURFACE in the scene's export.
+    ring.reverse_build.radius2 = 1.8
+    r_out = max(max(r[1], r[3]) for r in ring["reverse"]["profile"])
+    if abs(r_out - 1.8) > 1e-6:      # FloatProperty is single-precision
+        fail(f"ring profile did not follow radius edit: {r_out} != 1.8")
+    print("[ok] forward revolve: ring built, profile follows radius edit")
+
     # Whole cube, no segmentation: AUTO must now pick a BOX (not torus/sphere).
     n0 = len(bpy.context.scene.reverse.features)
     bpy.ops.mesh.primitive_cube_add(size=2.0)

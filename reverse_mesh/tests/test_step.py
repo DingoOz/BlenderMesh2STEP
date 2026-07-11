@@ -45,6 +45,14 @@ def _features():
         {"kind": "FILLET", "name": "fl", "params": {     # 90° edge fillet patch
             "base": (60, 0, 0), "axis": (0, 0, 1), "ref": (1, 0, 0),
             "radius": 1.0, "height": 4.0, "u_min": 0.0, "u_max": math.pi / 2}},
+        {"kind": "REVOLVE", "name": "rv", "params": {    # ball-end pin (arc zone)
+            "base": (80, 0, 0), "axis": (0, 0, 1),
+            "profile": [
+                [0, 0, 0, 1, 0, 0, 0, 0],
+                [0, 1, 0, 1, 2, 0, 0, 0],
+                [1, 1, 2, 0, 3, 0, 2, 1],
+                [0, 0, 3, 0, 0, 0, 0, 0],
+            ]}},
         {"kind": "EXTRUDE", "name": "ex", "params": {    # stadium/slot prism
             "base": (70, 0, 0), "axis": (0, 0, 1), "xdir": (1, 0, 0), "height": 1.5,
             "profile": [
@@ -91,7 +99,7 @@ def main():
         check(f"emits {ent[:-1]}", ent in text)
 
     n_solids = text.count("MANIFOLD_SOLID_BREP(")
-    check("solid count", n_solids == 7,   # box+cyl+2cone+sph+torus+extrude
+    check("solid count", n_solids == 8,   # box+cyl+2cone+sph+torus+extrude+revolve
           f"got {n_solids}")              # plane/fillet are surface models
 
     # All reals carry a decimal point (spot-check there are no bare integers in coords).

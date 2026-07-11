@@ -648,33 +648,26 @@ def _make_shape(kind, p, gp_Pnt, gp_Dir, gp_Ax3, gp_Pln,
     if kind == "EXTRUDE":
         # Profile wire (lines + three-point arcs) → planar face → prism.
         (MakePrism,) = _imp("BRepPrimAPI", "BRepPrimAPI_MakePrism")
-        (MakeEdge, MakeWire) = _imp("BRepBuilderAPI", "BRepBuilderAPI_MakeEdge",
-                                    "BRepBuilderAPI_MakeWire")
-        (GC_MakeArcOfCircle,) = _imp("GC", "GC_MakeArcOfCircle")
         (gp_Vec,) = _imp("gp", "gp_Vec")
-        from .fitting import profile as profile2d
 
         axis = _unit(tuple(float(c) for c in p["axis"]))
         e1, e2 = _extrude_basis(p)
         base = tuple(float(c) for c in p["base"])
         h = float(p["height"])
-
-        def to3(uv):
-            pt = _add(base, _add(_scale(e1, uv[0]), _scale(e2, uv[1])))
-            return gp_Pnt(pt[0], pt[1], pt[2])
-
-        wire = MakeWire()
-        for row in p["profile"]:
-            row = [float(x) for x in row]
-            s2, t2 = (row[1], row[2]), (row[3], row[4])
-            if row[0] == profile2d.ARC:
-                mid = profile2d.arc_midpoint(row)
-                arc = GC_MakeArcOfCircle(to3(s2), to3(mid), to3(t2)).Value()
-                wire.Add(MakeEdge(arc).Edge())
-            else:
-                wire.Add(MakeEdge(to3(s2), to3(t2)).Edge())
-        face = MakeFace(wire.Wire(), True).Face()
+        face = _profile_face(p["profile"], base, e1, e2, gp_Pnt, MakeFace)
         return MakePrism(face, gp_Vec(axis[0] * h, axis[1] * h, axis[2] * h)).Shape(), True
+    if kind == "REVOLVE":
+        # Profile wire in a meridian plane (u = radial, v = axial) revolved
+        # 360° about the axis.
+        (MakeRevol,) = _imp("BRepPrimAPI", "BRepPrimAPI_MakeRevol")
+        (gp_Ax1, gp_Dir_) = _imp("gp", "gp_Ax1", "gp_Dir")
+
+        axis = _unit(tuple(float(c) for c in p["axis"]))
+        xref = _perp(axis)
+        base = tuple(float(c) for c in p["base"])
+        face = _profile_face(p["profile"], base, xref, axis, gp_Pnt, MakeFace)
+        ax1 = gp_Ax1(gp_Pnt(*base), gp_Dir_(*axis))
+        return MakeRevol(face, ax1).Shape(), True
     if kind == "FILLET":
         # Trimmed cylindrical patch: u = arc angle [u_min, u_max], v = axial extent.
         (Geom_CylindricalSurface,) = _imp("Geom", "Geom_CylindricalSurface")
@@ -688,6 +681,37 @@ def _make_shape(kind, p, gp_Pnt, gp_Dir, gp_Ax3, gp_Pln,
         face = MakeFace(surf, p["u_min"], p["u_max"], -h / 2.0, h / 2.0, 1e-6).Face()
         return face, False
     return None, False
+
+
+def _profile_face(rows, base, e1, e2, gp_Pnt, MakeFace):
+    """Planar OCCT face from an (S, 8) profile in the (e1, e2) frame at ``base``.
+
+    Rows with (near-)zero length are skipped — e.g. a revolve profile's
+    synthetic closing segment can be degenerate when the solid touches the
+    axis at a single point.
+    """
+    (MakeEdge, MakeWire) = _imp("BRepBuilderAPI", "BRepBuilderAPI_MakeEdge",
+                                "BRepBuilderAPI_MakeWire")
+    (GC_MakeArcOfCircle,) = _imp("GC", "GC_MakeArcOfCircle")
+    from .fitting import profile as profile2d
+
+    def to3(uv):
+        pt = _add(base, _add(_scale(e1, uv[0]), _scale(e2, uv[1])))
+        return gp_Pnt(pt[0], pt[1], pt[2])
+
+    wire = MakeWire()
+    for row in rows:
+        row = [float(x) for x in row]
+        s2, t2 = (row[1], row[2]), (row[3], row[4])
+        if row[0] == profile2d.ARC:
+            mid = profile2d.arc_midpoint(row)
+            arc = GC_MakeArcOfCircle(to3(s2), to3(mid), to3(t2)).Value()
+            wire.Add(MakeEdge(arc).Edge())
+        else:
+            if math.hypot(t2[0] - s2[0], t2[1] - s2[1]) < 1e-12:
+                continue
+            wire.Add(MakeEdge(to3(s2), to3(t2)).Edge())
+    return MakeFace(wire.Wire(), True).Face()
 
 
 def _set_static(Interface_Static, key, value):

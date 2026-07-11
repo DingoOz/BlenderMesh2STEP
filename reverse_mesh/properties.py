@@ -27,6 +27,8 @@ PRIMITIVE_ITEMS = [
     ("FILLET", "Fillet", "Edge fillet / round → a trimmed partial cylinder", "MOD_BEVEL", 7),
     ("EXTRUDE", "Extrude", "Extruded planar profile (prism) — select the whole "
      "prism including its end caps", "MOD_SOLIDIFY", 8),
+    ("REVOLVE", "Revolve", "Solid of revolution (lathe part) — select the whole "
+     "revolved body; explicit only, never chosen by Auto-detect", "MOD_SCREW", 9),
 ]
 
 
@@ -37,6 +39,8 @@ BUILD_PRIMITIVE_ITEMS = [
     ("SPHERE", "Sphere", "A spherical solid", "MESH_UVSPHERE", 3),
     ("TORUS", "Torus", "A toroidal solid (ring)", "MESH_TORUS", 4),
     ("EXTRUDE", "Extrude (N-gon)", "An extruded regular-polygon prism", "MOD_SOLIDIFY", 5),
+    ("REVOLVE", "Ring (washer)", "A rectangular section revolved about the axis "
+     "— washers, spacers, bushings", "MOD_SCREW", 6),
 ]
 
 
@@ -69,6 +73,8 @@ def _on_build_param_update(self, context):
                              if h > 1e-12 else 0.0)
     if kind == "EXTRUDE":
         forward.refresh_extrude_profile(new)   # N-gon profile follows the radius
+    if kind == "REVOLVE":
+        forward.refresh_revolve_profile(new)   # ring section follows the radii
     # Reassign the whole dict: nested IDProperty writes don't reliably tag updates.
     obj["reverse"] = new
     segments = 48

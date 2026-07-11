@@ -39,6 +39,8 @@ def generate_mesh(kind, params, segments: int = 48):
         return _fillet(params, segments)
     if kind == "EXTRUDE":
         return _extrude(params, segments)
+    if kind == "REVOLVE":
+        return _revolve(params, segments)
     raise ValueError(f"Unknown primitive kind: {kind}")
 
 
@@ -280,6 +282,30 @@ def _extrude(p, segments):
     loc = Vector(tuple(float(x) for x in p["base"]))
     rot = Matrix((e1, e2, az)).transposed().to_4x4()
     return verts, faces, Matrix.Translation(loc) @ rot
+
+
+def _revolve(p, segments):
+    """Lathe preview of a revolve: the tessellated (radius, z) profile swept
+    about local +Z. Stations on the axis produce degenerate (collapsed) quad
+    corners, which is fine for a preview mesh."""
+    from .fitting import profile as profile2d
+
+    ring2d = profile2d.tessellate(p["profile"], segments)
+    m = len(ring2d)
+    n_seg = max(12, segments)
+    verts = []
+    for u, v in ring2d:
+        for k in range(n_seg):
+            a = 2 * math.pi * k / n_seg
+            verts.append((float(u) * math.cos(a), float(u) * math.sin(a), float(v)))
+    faces = []
+    for i in range(m):
+        i2 = (i + 1) % m
+        for k in range(n_seg):
+            k2 = (k + 1) % n_seg
+            faces.append((i * n_seg + k, i * n_seg + k2,
+                          i2 * n_seg + k2, i2 * n_seg + k))
+    return verts, faces, _axis_matrix(p["axis"], p["base"])
 
 
 def _serialise_params(kind, p, result):
