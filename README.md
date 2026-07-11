@@ -41,8 +41,9 @@ Blender-authored meshes. The result is a true B-rep solid, not an approximation.
   Export STEP and open it in FreeCAD as a true solid you can dimension and modify.
 - **Reconstruct boxes and cuboids** — even rotated ones — from their flat faces,
   instead of an averaged mess. One click turns a cube into a proper box solid.
-- **Recover edge fillets** as real rounds. Select a fillet strip → get a trimmed
-  partial-cylinder surface with the exact blend radius and arc, not faceted triangles.
+- **Recover edge fillets** as real rounds. Select a fillet strip → get the exact
+  blend radius and arc — and on the OCCT path the fillet is applied as a **true
+  rounded edge on the solid** (watertight, CAD-editable), not a loose patch.
 - **Drill holes and cut pockets with booleans.** Tag a fitted cylinder as
   *Subtract* and the exporter carves it out of the base body — reconstructing a
   drilled, pocketed part as a single watertight solid with real holes. Add a

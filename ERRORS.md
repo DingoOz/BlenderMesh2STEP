@@ -159,3 +159,13 @@
 - **Root cause:** `fit_torus` solves the radii by linear least squares; a hexagonal prism's 12 vertices form exactly 2 (rho, |w|) circles, making the system rank-deficient. The minimal-norm torus passes through every vertex exactly and slipped through AUTO's alignment and face-residual gates, misclassifying prisms as tori.
 - **Fix applied:** `fit_torus` now counts distinct (rho, |w|) circles at the fitted axis and returns None below 3.
 - **Prevention rule:** Before accepting an essentially-exact fit, check the sample set constrains all of the model's degrees of freedom; symmetric/layered selections (vertex rings, two planes) need explicit degeneracy guards, like the giant-radius sphere/cylinder and box-normal gates already in place.
+
+### Fillet-blend pass crashed Blender via closed edges and forced fusion — 2026-07-11
+
+- **Severity:** Critical
+- **Category:** API Misuse
+- **File(s):** `reverse_mesh/occ_export.py`
+- **Pattern:** (1) Passing unvalidated topology into an OCCT algorithm — `BRepFilletAPI_MakeFillet.Add` accepts closed/seam edges (a circle's start vertex equals its end vertex) but `Build()` can segfault on them, which Python `try/except` cannot catch. (2) Letting a new optional feature silently change an unrelated export mode — fillet presence forced *all* Add solids to fuse into one body, altering multi-part exports.
+- **Root cause:** The blend pass matched candidate edges only by distance-to-line of their endpoints; a closed edge's coincident endpoints trivially pass. `do_bool` was extended with `or fillet_feats`, changing the separate-solids path.
+- **Fix applied:** Edge candidates must have two distinct endpoints (`> 1e-6·r` apart); blends only apply when merge/cutters/stitch already produce a single base body.
+- **Prevention rule:** Never feed edges/faces into OCCT modeling algorithms without validating their topology class first (closed, degenerate, seam); and never let an additive option widen `do_bool`-style mode switches — gate new behaviour inside the existing mode.

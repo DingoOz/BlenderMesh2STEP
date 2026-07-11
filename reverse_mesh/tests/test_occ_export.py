@@ -490,6 +490,42 @@ def main():
         except OSError:
             pass
 
+    # Fillet blends (#13): a recognized FILLET applied as a true round on the
+    # solid's edge — volume drops by exactly (r² − πr²/4)·h, body stays valid
+    # and closed; a fillet with no matching edge falls back to a patch.
+    rb = 0.5
+    blend_box = {"kind": "BOX", "name": "b", "params": {
+        "center": (0, 0, 0), "ax": (1, 0, 0), "ay": (0, 1, 0), "az": (0, 0, 1),
+        "hx": 2.0, "hy": 2.0, "hz": 2.0}}
+    blend_fil = {"kind": "FILLET", "name": "f", "params": {
+        "base": (2 - rb, 2 - rb, 0.0), "axis": (0, 0, 1), "ref": (1, 0, 0),
+        "radius": rb, "height": 4.0, "u_min": 0.0, "u_max": math.pi / 2}}
+    out_bl = os.path.join(os.path.dirname(__file__), "occ_blend.step")
+    info_bl = occ_export.export([blend_box, blend_fil], out_bl, unit="MM",
+                                merge=True, blend_fillets=True)
+    vol_bl = 64.0 - (rb * rb - math.pi * rb * rb / 4.0) * 4.0
+    if "1 fillet blend(s)" not in str(info_bl):
+        fail(f"fillet blend not applied: {info_bl}")
+    if not info_bl.solids or abs(info_bl.solids[0]["volume"] - vol_bl) > 1e-6 \
+            or not info_bl.solids[0]["valid"]:
+        fail(f"fillet blend volume wrong: {info_bl.solids} expected {vol_bl}")
+    print(f"[ok] fillet blend: rounded solid volume exact "
+          f"({info_bl.solids[0]['volume']:.6f}), valid")
+    far_fil = {"kind": "FILLET", "name": "f2", "params": {
+        "base": (30.0, 30.0, 0.0), "axis": (0, 0, 1), "ref": (1, 0, 0),
+        "radius": rb, "height": 4.0, "u_min": 0.0, "u_max": math.pi / 2}}
+    info_um = occ_export.export([blend_box, far_fil], out_bl, unit="MM",
+                                merge=True, blend_fillets=True)
+    if "unmatched" not in str(info_um):
+        fail(f"unmatched fillet should fall back to a patch: {info_um}")
+    if not info_um.solids or abs(info_um.solids[0]["volume"] - 64.0) > 1e-6:
+        fail(f"unmatched fillet altered the solid: {info_um.solids}")
+    print("[ok] unmatched fillet falls back to a trimmed patch, solid untouched")
+    try:
+        os.remove(out_bl)
+    except OSError:
+        pass
+
     for f in (out, out2):
         try:
             os.remove(f)
