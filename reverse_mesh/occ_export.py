@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import importlib
 import math
+import os
 
-from .step_export import (  # geometry helpers
-    _add, _cross, _dot, _norm, _perp, _scale, _sub, _unit,
+from .step_export import (  # geometry helpers + shared colour table
+    DEFAULT_COLORS, _add, _cross, _dot, _norm, _perp, _scale, _sub, _unit,
 )
 
 
@@ -307,6 +308,53 @@ def _apply_fillet_blends(base, fillet_feats):
         return base, 0, fillet_feats
 
 
+def _feat_label(feat):
+    """(name, rgb) for a feature — its own colour or the kind's default."""
+    name = str(feat.get("name") or feat.get("kind", "part"))
+    color = feat.get("color") or DEFAULT_COLORS.get(feat.get("kind", ""), None)
+    return name, color
+
+
+def _write_xcaf(labeled, filepath, unit):
+    """Write ``labeled`` [(shape, name, rgb|None)] as named, coloured bodies.
+
+    Uses the XCAF document layer (STEPCAFControl_Writer) so each body is its
+    own named PRODUCT and colours survive into FreeCAD/Fusion — unlike the
+    plain STEPControl path, which collapses everything into one anonymous
+    product. Raises on any failure; the caller falls back to the plain path.
+    """
+    (TDocStd_Document,) = _imp("TDocStd", "TDocStd_Document")
+    (XCAFDoc_DocumentTool, XCAFDoc_ColorGen) = _imp(
+        "XCAFDoc", "XCAFDoc_DocumentTool", "XCAFDoc_ColorGen")
+    (TDataStd_Name,) = _imp("TDataStd", "TDataStd_Name")
+    (TCollection_ExtendedString,) = _imp("TCollection", "TCollection_ExtendedString")
+    (Quantity_Color, Quantity_TOC_RGB) = _imp(
+        "Quantity", "Quantity_Color", "Quantity_TOC_RGB")
+    (STEPCAFControl_Writer,) = _imp("STEPCAFControl", "STEPCAFControl_Writer")
+    (Interface_Static,) = _imp("Interface", "Interface_Static")
+    (IFSelect_RetDone,) = _imp("IFSelect", "IFSelect_RetDone")
+
+    doc = TDocStd_Document(TCollection_ExtendedString("XmlOcaf"))
+    shape_tool = XCAFDoc_DocumentTool.ShapeTool_s(doc.Main())
+    color_tool = XCAFDoc_DocumentTool.ColorTool_s(doc.Main())
+    for shape, name, rgb in labeled:
+        label = shape_tool.AddShape(shape, False)
+        set_name = getattr(TDataStd_Name, "Set_s", None) or TDataStd_Name.Set
+        set_name(label, TCollection_ExtendedString(name))
+        if rgb is not None:
+            col = Quantity_Color(float(rgb[0]), float(rgb[1]), float(rgb[2]),
+                                 Quantity_TOC_RGB)
+            color_tool.SetColor(label, col, XCAFDoc_ColorGen)
+
+    writer = STEPCAFControl_Writer()
+    _set_static(Interface_Static, "write.step.schema", "AP242DIS")
+    _set_static(Interface_Static, "write.step.unit",
+                {"MM": "MM", "M": "M", "IN": "INCH"}.get(unit, "MM"))
+    writer.Transfer(doc, _as_is())
+    if writer.Write(filepath) != IFSelect_RetDone:
+        raise RuntimeError("STEPCAFControl_Writer.Write failed")
+
+
 def _unify(shape):
     """Merge coincident faces/edges of a fused shape into shared topology.
 
@@ -456,10 +504,10 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
         if shape is None:
             continue
         if is_solid:
-            adds.append(shape)
+            adds.append((shape, feat))
             seq.append(("ADD", shape))
         else:
-            faces.append(shape)
+            faces.append((shape, feat))
 
     if not adds and not cutters and not faces and not fillet_feats:
         raise ValueError("No exportable shapes")
@@ -486,7 +534,8 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
     # single base body (merge / cutters / stitch) — a fillet alone must not
     # force fusing otherwise-separate solids.
     do_bool = merge or auto_stitch or bool(cutters)
-    parts = list(faces)
+    # (shape, name, rgb) triples: identity feeds the XCAF named-body writer.
+    labeled = [(shape, *_feat_label(feat)) for shape, feat in faces]
     note = ""
     skipped = []
     unmatched_fillets = list(fillet_feats)
@@ -503,8 +552,8 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
                     base, ok = apply_cutter(base, item)
                     n_cut += 1 if ok else 0
         else:
-            base = adds[0]
-            for s in adds[1:]:
+            base = adds[0][0]
+            for s, _feat in adds[1:]:
                 base = Fuse(base, s).Shape()
             for feat in cutters:
                 base, ok = apply_cutter(base, feat)
@@ -520,7 +569,8 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
                 note_stitch = f" — stitch failed: {exc}"
         else:
             note_stitch = ""
-        parts.append(base)
+        body_name = os.path.splitext(os.path.basename(filepath))[0] or "body"
+        labeled.append((base, body_name, _feat_label(adds[0][1])[1]))
         note_blend = f" — {n_blend} fillet blend(s)" if n_blend else ""
         note = f"1 body (+{len(adds)} / -{n_cut}){note_blend}{note_stitch}"
         if skipped:
@@ -531,8 +581,8 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
         for feat in cutters:
             shape, ok = build(feat["kind"], feat["params"])
             if shape is not None:
-                parts.append(shape)
-        parts.extend(adds)
+                labeled.append((shape, *_feat_label(feat)))
+        labeled.extend((shape, *_feat_label(feat)) for shape, feat in adds)
         if cutters and not adds:
             note = f"{len(cutters)} cutter(s) with no base to subtract from"
         note = note or f"{len(adds) + len(cutters)} solid(s)"
@@ -542,15 +592,15 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
     for feat in unmatched_fillets:
         shape, _is_solid = build("FILLET", feat["params"])
         if shape is not None:
-            parts.append(shape)
+            labeled.append((shape, *_feat_label(feat)))
     if fillet_feats and unmatched_fillets:
         note += f" — {len(unmatched_fillets)} fillet(s) unmatched (kept as patches)"
 
-    # Combine into one compound to transfer in a single shape.
+    # Combine into one compound (for the watertight pass + validation report).
     builder = BRep_Builder()
     compound = TopoDS_Compound()
     builder.MakeCompound(compound)
-    for part in parts:
+    for part, _name, _rgb in labeled:
         builder.Add(compound, part)
 
     free_edges = None
@@ -567,16 +617,30 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
         except Exception as exc:
             note += f" — watertight pass failed: {exc}"
 
-    # The writer's constructor registers the STEP static parameters, so schema/
-    # unit must be set *after* it is created. OCCT's AP242 value is "AP242DIS".
-    writer = STEPControl_Writer()
-    _set_static(Interface_Static, "write.step.schema", "AP242DIS")
-    _set_static(Interface_Static, "write.step.unit",
-                {"MM": "MM", "M": "M", "IN": "INCH"}.get(unit, "MM"))
-    as_is = _as_is()
-    writer.Transfer(compound, as_is)
-    if writer.Write(filepath) != IFSelect_RetDone:
-        raise RuntimeError("STEPControl_Writer.Write failed")
+    # Prefer the XCAF document writer: each body becomes its own named,
+    # coloured PRODUCT (survives into FreeCAD/Fusion). The watertight pass
+    # rebuilds the geometry as one healed compound, losing per-body identity,
+    # so it keeps the plain single-product path.
+    wrote_xcaf = False
+    if not watertight:
+        try:
+            _write_xcaf(labeled, filepath, unit)
+            wrote_xcaf = True
+            note += f" — {len(labeled)} named bodies + colours (XCAF)"
+        except Exception:
+            wrote_xcaf = False
+    if not wrote_xcaf:
+        # The writer's constructor registers the STEP static parameters, so
+        # schema/unit must be set *after* it is created. OCCT's AP242 value is
+        # "AP242DIS".
+        writer = STEPControl_Writer()
+        _set_static(Interface_Static, "write.step.schema", "AP242DIS")
+        _set_static(Interface_Static, "write.step.unit",
+                    {"MM": "MM", "M": "M", "IN": "INCH"}.get(unit, "MM"))
+        as_is = _as_is()
+        writer.Transfer(compound, as_is)
+        if writer.Write(filepath) != IFSelect_RetDone:
+            raise RuntimeError("STEPControl_Writer.Write failed")
 
     # Validation report: per-solid volume + validity, surfaced to the user.
     try:

@@ -408,6 +408,15 @@ Scenes with unit system \emph{None} pass coordinates through unchanged.
     writer only).
 \end{itemize}
 
+\subsection{Named bodies and colours}
+
+On the OCCT path, exports are written through the XCAF document layer:
+every body becomes its \emph{own named product} (the feature or object
+name) and per-feature colours are embedded so they survive into
+FreeCAD/Fusion. With \ui{Merge into one solid} the merged body takes the
+file's name. The \ui{Make watertight} pass rebuilds geometry as one healed
+body and therefore falls back to a single unnamed product.
+
 \subsection{The validation report}
 
 After an OCCT export, the \ui{Validation Report} sub-panel lists every solid

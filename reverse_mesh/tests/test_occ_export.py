@@ -587,6 +587,61 @@ def main():
         except OSError:
             pass
 
+    # XCAF multi-body (#15): separate solids export as named, coloured bodies
+    # that survive a STEPCAF round-trip (what FreeCAD/Fusion read).
+    mb_feats = [
+        {"kind": "BOX", "name": "BasePlate", "color": (0.8, 0.2, 0.2), "params": {
+            "center": (0, 0, 0), "ax": (1, 0, 0), "ay": (0, 1, 0), "az": (0, 0, 1),
+            "hx": 3.0, "hy": 2.0, "hz": 0.5}},
+        {"kind": "CYLINDER", "name": "Boss", "color": (0.2, 0.4, 0.9), "params": {
+            "base": (10, 0, 0), "axis": (0, 0, 1), "radius": 1.0, "height": 2.0}},
+    ]
+    out_mb = os.path.join(os.path.dirname(__file__), "occ_multibody.step")
+    info_mb = occ_export.export(mb_feats, out_mb, unit="MM")
+    if "named bodies" not in str(info_mb):
+        fail(f"XCAF path not used: {info_mb}")
+    try:
+        from OCP.STEPCAFControl import STEPCAFControl_Reader
+        from OCP.TDocStd import TDocStd_Document
+        from OCP.XCAFDoc import XCAFDoc_DocumentTool, XCAFDoc_ColorSurf
+        from OCP.TCollection import TCollection_ExtendedString
+        from OCP.TDF import TDF_LabelSequence
+        from OCP.TDataStd import TDataStd_Name
+        from OCP.Quantity import Quantity_Color
+    except ImportError:
+        print("[skip] STEPCAF reader unavailable — XCAF round-trip not verified")
+    else:
+        doc = TDocStd_Document(TCollection_ExtendedString("XmlOcaf"))
+        rdr = STEPCAFControl_Reader()
+        rdr.SetColorMode(True)
+        rdr.SetNameMode(True)
+        if rdr.ReadFile(out_mb) != IFSelect_RetDone:
+            fail("XCAF STEP did not re-read")
+        rdr.Transfer(doc)
+        st = XCAFDoc_DocumentTool.ShapeTool_s(doc.Main())
+        ct = XCAFDoc_DocumentTool.ColorTool_s(doc.Main())
+        labs = TDF_LabelSequence()
+        st.GetFreeShapes(labs)
+        found = {}
+        for i in range(1, labs.Length() + 1):
+            lab = labs.Value(i)
+            nm = TDataStd_Name()
+            name = (str(nm.Get().ToExtString())
+                    if lab.FindAttribute(TDataStd_Name.GetID_s(), nm) else "")
+            col = Quantity_Color()
+            rgb = ((round(col.Red(), 2), round(col.Green(), 2), round(col.Blue(), 2))
+                   if ct.GetColor(st.GetShape_s(lab), XCAFDoc_ColorSurf, col) else None)
+            found[name] = rgb
+        if set(found) != {"BasePlate", "Boss"}:
+            fail(f"body names wrong: {found}")
+        if found["BasePlate"] != (0.8, 0.2, 0.2) or found["Boss"] != (0.2, 0.4, 0.9):
+            fail(f"body colours wrong: {found}")
+        print(f"[ok] XCAF multi-body: {len(found)} named bodies, colours round-trip")
+    try:
+        os.remove(out_mb)
+    except OSError:
+        pass
+
     for f in (out, out2):
         try:
             os.remove(f)
