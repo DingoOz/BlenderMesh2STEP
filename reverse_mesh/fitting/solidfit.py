@@ -52,21 +52,37 @@ class SDFGrid:
         return self.origin + np.stack([gi, gj, gk], axis=-1) * self.spacing
 
     def sample(self, pts: np.ndarray) -> np.ndarray:
-        """Nearest-voxel signed distance at arbitrary world points.
+        """Trilinearly interpolated signed distance at arbitrary world points.
 
         Points outside the grid return a large negative value (treated as solidly
         outside), so a primitive poking past the grid is never deemed contained.
+        Interpolation (rather than nearest-voxel lookup) keeps containment tests
+        honest between voxel centres, which matters at coarse resolutions.
         """
         nx, ny, nz = self.sd.shape
-        idx = np.rint((pts - self.origin) / self.spacing).astype(int)
+        g = (np.asarray(pts, dtype=float) - self.origin) / self.spacing
         inside = (
-            (idx[:, 0] >= 0) & (idx[:, 0] < nx)
-            & (idx[:, 1] >= 0) & (idx[:, 1] < ny)
-            & (idx[:, 2] >= 0) & (idx[:, 2] < nz)
+            (g[:, 0] >= 0) & (g[:, 0] <= nx - 1)
+            & (g[:, 1] >= 0) & (g[:, 1] <= ny - 1)
+            & (g[:, 2] >= 0) & (g[:, 2] <= nz - 1)
         )
         out = np.full(len(pts), -1e18)
-        ii = idx[inside]
-        out[inside] = self.sd[ii[:, 0], ii[:, 1], ii[:, 2]]
+        if not np.any(inside):
+            return out
+        gi = g[inside]
+        i0 = np.maximum(np.minimum(np.floor(gi).astype(int),
+                                   np.array([nx - 2, ny - 2, nz - 2])), 0)
+        f = gi - i0
+        acc = np.zeros(len(gi))
+        for dx in (0, 1):
+            wx = f[:, 0] if dx else 1.0 - f[:, 0]
+            for dy in (0, 1):
+                wy = f[:, 1] if dy else 1.0 - f[:, 1]
+                for dz in (0, 1):
+                    wz = f[:, 2] if dz else 1.0 - f[:, 2]
+                    acc += (wx * wy * wz
+                            * self.sd[i0[:, 0] + dx, i0[:, 1] + dy, i0[:, 2] + dz])
+        out[inside] = acc
         return out
 
 
@@ -161,6 +177,103 @@ def _cylinder_candidates(coords, sd, remaining, grid, contain_tol):
     return out
 
 
+def _cone_for_axis(coords, sd, remaining, axis, grid, contain_tol):
+    """Best inscribed cone frustum along ``axis`` over the uncovered interior.
+
+    Uses the same per-slice inradius profile as the cylinder search, but fits a
+    linear taper: every pair of slice endpoints proposes a slope, the offset is
+    dropped until the line sits under the whole profile, and the largest-volume
+    frustum wins. Skipped when the taper is negligible (a cylinder covers it).
+    """
+    pts = coords[remaining]
+    if len(pts) < 8:
+        return None
+    axis = axis / max(np.linalg.norm(axis), 1e-12)
+    c = pts.mean(axis=0)
+    rel = pts - c
+    t = rel @ axis
+    rho = np.linalg.norm(rel - np.outer(t, axis), axis=1)
+    nb = max(8, min(40, int((t.max() - t.min()) / grid.spacing)))
+    edges = np.linspace(t.min(), t.max(), nb + 1)
+    binid = np.clip(np.digitize(t, edges) - 1, 0, nb - 1)
+    # Per-slice radial extent of the interior — unlike the SDF clearance (which
+    # the caps dominate near the ends, turning a taper into a tent), this reads
+    # the cross-section radius directly. Inset by half a voxel so the frustum
+    # stays inscribed; the containment test has the final word.
+    inradius = np.zeros(nb)
+    for b in range(nb):
+        m = binid == b
+        inradius[b] = max(0.0, rho[m].max() - 0.5 * grid.spacing) if np.any(m) else 0.0
+    centres = 0.5 * (edges[:-1] + edges[1:])
+    occupied = inradius > 0
+
+    best = None
+    for b0 in range(nb):
+        if not occupied[b0]:
+            continue
+        for b1 in range(b0 + 2, nb):
+            if not np.all(occupied[b0:b1 + 1]):
+                break
+            h = float(centres[b1] - centres[b0])
+            if h <= grid.spacing:
+                continue
+            slope = (inradius[b1] - inradius[b0]) / h
+            seg = slice(b0, b1 + 1)
+            line = inradius[b0] + slope * (centres[seg] - centres[b0])
+            drop = float(np.min(inradius[seg] - line))
+            r0 = inradius[b0] + drop
+            r1 = inradius[b1] + drop
+            if min(r0, r1) < 0 or max(r0, r1) <= grid.spacing:
+                continue
+            if abs(r1 - r0) < 0.15 * max(r0, r1):
+                continue                     # barely tapered — cylinder territory
+            vol = np.pi * h / 3.0 * (r0 * r0 + r0 * r1 + r1 * r1)
+            if best is None or vol > best[0]:
+                best = (vol, float(r0), float(r1), float(centres[b0]), float(centres[b1]))
+    if best is None:
+        return None
+    _, r0, r1, t0, t1 = best
+    h = t1 - t0
+    base = c + axis * t0
+    cone = FitResult(kind="CONE", rms=0.0, max_error=0.0,
+                     params={"base": base, "axis": axis, "radius1": r0,
+                             "radius2": r1, "height": h,
+                             "half_angle": float(np.arctan(abs(r1 - r0) / h))})
+    if not _contained(cone, grid, contain_tol):
+        return None
+    return cone
+
+
+def _torus_candidate(coords, sd, remaining, grid, contain_tol):
+    """Largest inscribed torus around the uncovered interior's PCA axis.
+
+    Seeded from the most-interior uncovered voxel: the tube passes through it
+    (major radius = its distance from the axis) with the tube radius set by its
+    clearance. Recovers ring-shaped volumes that spheres/cylinders tile badly.
+    """
+    pts = coords[remaining]
+    sdv = sd[remaining]
+    if len(pts) < 16:
+        return None
+    c, vh = _principal_axes(pts)
+    axis = vh[2]                              # least-spread direction ≈ ring axis
+    k = int(np.argmax(sdv))
+    seed = pts[k]
+    r_minor = float(sdv[k])
+    rel = seed - c
+    w0 = float(rel @ axis)
+    big_r = float(np.linalg.norm(rel - w0 * axis))
+    if big_r <= r_minor or r_minor <= grid.spacing:
+        return None                           # spindle/degenerate — not a ring
+    centre = c + axis * w0
+    torus = FitResult(kind="TORUS", rms=0.0, max_error=0.0,
+                      params={"center": centre, "axis": axis,
+                              "major_radius": big_r, "minor_radius": r_minor})
+    if not _contained(torus, grid, contain_tol):
+        return None
+    return torus
+
+
 def _box_candidate(coords, sd, remaining, grid, contain_tol):
     """Oriented (PCA) box, shrunk along each axis until it sits inside the solid."""
     pts = coords[remaining]
@@ -212,6 +325,29 @@ def _surface_samples(prim):
         pts = [np.asarray(p["base"]) + z * axis + ring for z in zs]
         # include cap rims (already covered) — fine
         return np.vstack(pts)
+    if prim.kind == "CONE":
+        axis = np.asarray(p["axis"]); axis = axis / np.linalg.norm(axis)
+        e1, e2 = _basis(axis)
+        ang = np.linspace(0, 2 * np.pi, 16, endpoint=False)
+        pts = []
+        for f in np.linspace(0.0, 1.0, 6):
+            r = p["radius1"] + (p["radius2"] - p["radius1"]) * f
+            ring = r * (np.outer(np.cos(ang), e1) + np.outer(np.sin(ang), e2))
+            pts.append(np.asarray(p["base"]) + f * p["height"] * axis + ring)
+        return np.vstack(pts)
+    if prim.kind == "TORUS":
+        axis = np.asarray(p["axis"]); axis = axis / np.linalg.norm(axis)
+        e1, e2 = _basis(axis)
+        u = np.linspace(0, 2 * np.pi, 16, endpoint=False)
+        v = np.linspace(0, 2 * np.pi, 8, endpoint=False)
+        uu, vv = np.meshgrid(u, v)
+        flat_u, flat_v = uu.ravel(), vv.ravel()
+        radial = (p["major_radius"] + p["minor_radius"] * np.cos(flat_v))
+        pts = (np.asarray(p["center"])
+               + np.outer(radial * np.cos(flat_u), e1)
+               + np.outer(radial * np.sin(flat_u), e2)
+               + np.outer(p["minor_radius"] * np.sin(flat_v), axis))
+        return pts
     if prim.kind == "BOX":
         ax, ay, az = (np.asarray(p[k]) for k in ("ax", "ay", "az"))
         hx, hy, hz = p["hx"], p["hy"], p["hz"]
@@ -248,6 +384,21 @@ def _voxels_in(prim, coords):
         w = rel @ axis
         rho = np.linalg.norm(rel - np.outer(w, axis), axis=1)
         m = (rho <= p["radius"]) & (np.abs(w) <= 0.5 * p["height"])
+    elif prim.kind == "CONE":
+        axis = np.asarray(p["axis"]); axis = axis / np.linalg.norm(axis)
+        rel = X - np.asarray(p["base"])
+        w = rel @ axis
+        rho = np.linalg.norm(rel - np.outer(w, axis), axis=1)
+        h = p["height"]
+        f = np.clip(w / h, 0.0, 1.0)
+        r_at = p["radius1"] + (p["radius2"] - p["radius1"]) * f
+        m = (w >= 0.0) & (w <= h) & (rho <= r_at)
+    elif prim.kind == "TORUS":
+        axis = np.asarray(p["axis"]); axis = axis / np.linalg.norm(axis)
+        rel = X - np.asarray(p["center"])
+        w = rel @ axis
+        rho = np.linalg.norm(rel - np.outer(w, axis), axis=1)
+        m = np.hypot(rho - p["major_radius"], w) <= p["minor_radius"]
     elif prim.kind == "BOX":
         ax, ay, az = (np.asarray(p[k]) for k in ("ax", "ay", "az"))
         rel = X - np.asarray(p["center"])
@@ -286,6 +437,17 @@ def fit_solids(grid: SDFGrid, *, max_primitives=16, min_cover_frac=0.01,
         if sph is not None:
             cands.append(sph)
         cands += _cylinder_candidates(coords, grid.sd, remaining, grid, tol)
+        pts_r = coords[remaining]
+        if len(pts_r) >= 8:
+            _, vh = _principal_axes(pts_r)
+            for a in (vh[0], np.array([1.0, 0, 0]), np.array([0, 1.0, 0]),
+                      np.array([0, 0, 1.0])):
+                cone = _cone_for_axis(coords, grid.sd, remaining, a, grid, tol)
+                if cone is not None:
+                    cands.append(cone)
+        tor = _torus_candidate(coords, grid.sd, remaining, grid, tol)
+        if tor is not None:
+            cands.append(tor)
         box = _box_candidate(coords, grid.sd, remaining, grid, tol)
         if box is not None:
             cands.append(box)
