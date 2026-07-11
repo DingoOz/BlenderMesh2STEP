@@ -1,0 +1,491 @@
+% SPDX-License-Identifier: GPL-3.0-or-later
+% BlenderMesh2STEP user guide.  Build with:  latexmk -pdf user-guide.tex
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.6cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{parskip}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{fancyhdr}
+\usepackage{listings}
+\usepackage[colorlinks=true, linkcolor=blue!50!black, urlcolor=blue!50!black]{hyperref}
+\usepackage[most]{tcolorbox}
+
+\definecolor{panelgray}{gray}{0.95}
+\definecolor{warnred}{RGB}{180,60,40}
+\definecolor{okgreen}{RGB}{40,130,60}
+
+\newtcolorbox{tipbox}{colback=okgreen!6, colframe=okgreen!70!black,
+  title=Tip, fonttitle=\bfseries, boxrule=0.6pt, left=6pt, right=6pt}
+\newtcolorbox{warnbox}{colback=warnred!6, colframe=warnred,
+  title=Important, fonttitle=\bfseries, boxrule=0.6pt, left=6pt, right=6pt}
+
+\lstset{basicstyle=\ttfamily\small, backgroundcolor=\color{panelgray},
+  frame=single, framerule=0pt, breaklines=true, columns=fullflexible}
+
+\newcommand{\ui}[1]{\textsf{\textbf{#1}}}   % a button / panel label
+\newcommand{\version}{0.11.0}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small BlenderMesh2STEP User Guide}
+\fancyhead[R]{\small v\version}
+\fancyfoot[C]{\thepage}
+
+\title{\Huge BlenderMesh2STEP\\[0.4em]
+  \Large Turn Blender meshes into real CAD STEP solids\\[0.8em]
+  \large User Guide --- version \version}
+\author{}
+\date{2026-07-11}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+
+\begin{abstract}
+\noindent
+BlenderMesh2STEP is a Blender 4.2+ extension that converts triangle meshes into
+genuine STEP AP242 B-rep solids --- the kind FreeCAD, Fusion~360, SolidWorks
+and Onshape open as editable, measurable, manufacturable geometry. You select
+the faces of a feature, the extension fits the exact analytic surface (plane,
+box, cylinder, cone, sphere, torus, fillet) by least squares --- typically to
+machine precision on clean Blender-authored meshes --- and the exporter writes a
+true solid, with real holes and pockets cut by boolean operations. This guide
+covers installation, the reverse (mesh $\to$ CAD) workflow, forward parametric
+modeling, exporting, and verifying the result.
+\end{abstract}
+
+\tableofcontents
+\clearpage
+
+%=====================================================================
+\section{Introduction}
+
+\subsection{The problem}
+
+A mesh has thrown away the \emph{intent} you want back: a
+20\,mm cylinder and a 64-sided prism are identical triangle soups. Exporting
+STL (or tessellated STEP) hands a machine shop a faceted blob they cannot
+measure, fillet, or edit.
+
+BlenderMesh2STEP does not guess --- \textbf{you point, it reconstructs}. You
+tell it ``these faces are a cylinder,'' and it recovers the exact analytic
+surface by least-squares fitting. The result is a true boundary-representation
+(B-rep) solid with real \texttt{CYLINDRICAL\_SURFACE} entities, not an
+approximation. On clean meshes the fits land at $\sim$$10^{-8}$ RMS ---
+effectively exact.
+
+\subsection{Two workflows}
+
+\begin{description}[style=nextline]
+  \item[Reverse (mesh $\to$ CAD)] Select the faces of one feature in Edit
+    Mode, fit a primitive, repeat per feature, export. This is the main
+    workflow and the subject of Section~\ref{sec:reverse}.
+  \item[Forward (build $\to$ CAD)] Add parametric STEP-primitive solids
+    directly from the \ui{Build --- STEP Primitives} panel. These are
+    STEP-exact \emph{by construction}; the viewport mesh is only a preview.
+    See Section~\ref{sec:forward}.
+\end{description}
+
+Both workflows feed the same \emph{feature stack} and the same exporter, and
+can be mixed freely --- e.g.\ fit a base plate from a mesh, then add a
+forward-built cylinder as a \emph{Subtract} feature to drill a hole.
+
+\subsection{Two export backends}
+\label{sec:backends}
+
+\begin{description}[style=nextline]
+  \item[OCCT kernel (recommended)] Uses OpenCASCADE --- the kernel FreeCAD is
+    built on --- installed on demand from the panel (Section~\ref{sec:occt}).
+    This is the path that can \emph{cut holes} (booleans), merge bodies into
+    one watertight solid, heal gaps, and validate the result (per-solid
+    volume and topology checks).
+  \item[Pure-Python writer (fallback)] Zero dependencies. Writes real analytic
+    AP242 solids, but has \textbf{no boolean kernel}: subtractive features
+    cannot be cut from the part (Section~\ref{sec:purepython}).
+\end{description}
+
+\begin{warnbox}
+If your part has holes, pockets, counterbores, or must be a single watertight
+body, install the OCCT kernel. Without it a ``hole'' can only be marked,
+skipped, or written as filled material --- never actually cut.
+\end{warnbox}
+
+%=====================================================================
+\section{Installation}
+
+\subsection{Requirements}
+
+\begin{itemize}[nosep]
+  \item Blender \textbf{4.2 or newer} (the extension uses the 4.2+ extension
+    format).
+  \item No other dependencies for fitting and the pure-Python STEP writer.
+  \item Optionally, the OCCT kernel ($\sim$100\,MB, one click) for booleans,
+    watertight sewing, and validation.
+\end{itemize}
+
+\subsection{Installing the extension}
+
+\begin{enumerate}[nosep]
+  \item Download \texttt{reverse\_mesh-\version.zip} from the project's GitHub
+    Releases page.
+  \item In Blender: \ui{Edit} $\to$ \ui{Preferences} $\to$ \ui{Get Extensions}
+    $\to$ (top-right dropdown) \ui{Install from Disk\ldots} and pick the zip.
+  \item Enable it if it is not enabled automatically. The \ui{Reverse} tab
+    appears in the 3D-viewport sidebar (press \texttt{N}).
+\end{enumerate}
+
+\subsection{Installing the OCCT kernel}
+\label{sec:occt}
+
+In the \ui{Reverse} tab, open \ui{Fitted Features} $\to$ \ui{Export} and click
+\ui{Install OCCT}. This downloads the \texttt{cadquery-ocp} binding into the
+extension's own directory (it does not touch your system Python). When it is
+ready the panel shows \ui{OCCT ready}. All boolean and watertightness options
+in the export dialog are marked \emph{(OCCT only)} and silently do nothing on
+the pure-Python path.
+
+%=====================================================================
+\section{Quick start: the 60-second workflow}
+
+\begin{enumerate}[nosep]
+  \item Select your mesh object, enter \textbf{Edit Mode}, open the
+    \ui{Reverse} tab in the sidebar (\texttt{N}).
+  \item Choose a \ui{Primitive} (or leave \ui{Auto-detect}) and a \ui{Role}:
+    \emph{Add} for material, \emph{Subtract} for a hole/pocket cutter.
+  \item Select the faces of \emph{one} feature. Click one face of a wall and
+    use \ui{Select Similar} to grow the selection across the whole surface
+    (it stops at sharp edges).
+  \item Click \ui{Fit Primitive to Selection}. The fit lands in the
+    \ui{Fitted Features} stack with its RMS error; the optional heatmap
+    colours the faces by deviation. Repeat for each feature.
+  \item Click \ui{Export STEP (AP242)}, review the options
+    (Section~\ref{sec:export}), export, and read the \ui{Validation Report}
+    panel to confirm volumes and watertightness.
+\end{enumerate}
+
+%=====================================================================
+\section{The reverse workflow in detail}
+\label{sec:reverse}
+
+\subsection{Primitives you can fit}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Primitive} & \textbf{Recovers} & \textbf{Notes} \\
+\midrule
+Plane    & flat face with extent            & exported as a bounded planar patch \\
+Box      & oriented cuboid (rotation too)   & fit from several flat faces at once \\
+Cylinder & axis, radius, height             & the workhorse for holes and bosses \\
+Cone     & apex, half-angle, radii          & full cones and frustums \\
+Sphere   & centre, radius                   & \\
+Torus    & axis, major + minor radius       & best on full rings \\
+Fillet   & edge round $\to$ partial cylinder & radius + arc extent; arcs $<330^\circ$ \\
+Auto     & best of the above                & normal-agreement gate + simplicity tie-break \\
+\bottomrule
+\end{tabular}
+\caption{Fittable primitives. All fits report RMS and maximum error.}
+\end{table}
+
+\ui{Auto-detect} tries every primitive and keeps the best fit, preferring the
+\emph{simplest} primitive when several explain the selection equally well
+(a flat patch becomes a plane, not a giant sphere). The runner-up candidates
+are shown for the active feature so you can see how close the call was.
+
+\subsection{Selecting a feature's faces}
+
+\begin{itemize}[nosep]
+  \item \ui{Select Similar} grows the selection from the active face across
+    edges whose face-normal angle is below the \emph{crease angle} --- one
+    click on a cylindrical wall selects the whole wall and stops at the caps.
+  \item \ui{Segment regions} (in the main panel) splits a multi-surface
+    selection into smooth-connected regions and fits each separately --- e.g.\
+    a whole cube selection becomes 6 planes; a full cylinder becomes side +
+    2 caps.
+\end{itemize}
+
+\subsection{Fit quality controls}
+
+\begin{description}[style=nextline]
+  \item[Fit-quality heatmap] Colours the selected faces green $\to$ red by
+    deviation from the fitted surface, so a stray chamfer or mis-picked face
+    is obvious instead of buried in an average.
+  \item[Reject outliers (RANSAC)] Trims faces that deviate from the consensus
+    surface and refits on the rest. Use when a selection is slightly dirty
+    (an odd triangle, the start of a chamfer).
+  \item[Snap dimensions] Rounds fitted radii/lengths to a nice value
+    (e.g.\ $19.98 \to 20.0$) when they are already very close, so the STEP
+    carries manufacturable numbers. Presets 0.1 / 0.5 / 1.0 or a custom step.
+  \item[Tolerance] The RMS threshold (as a fraction of region size) above
+    which the fit is flagged as poor.
+\end{description}
+
+\subsection{Propagate Pattern: fit one hole, get the rest}
+
+Fit \emph{one} hole (a subtractive cylinder), then click
+\ui{Propagate Pattern}. The extension scans the mesh for every matching hole
+--- same radius and axis direction within tolerance --- and fits them all with
+the seed's settings. Bolt circles, linear arrays and mirrored holes are
+recognised and labelled (circular / linear / scattered).
+
+\subsection{Whole-mesh auto-decompose (experimental)}
+
+Two heavier, whole-mesh paths exist for when you want a first pass without
+hand-selecting anything. Both are marked red in the UI because they optimise
+over the \emph{entire} mesh and can take a while:
+
+\begin{description}[style=nextline]
+  \item[Auto-Decompose Whole Mesh] Surface decomposition: sweeps
+    coarse$\to$fine crease angles, builds competing primitive hypotheses, and
+    selects a set by global energy minimisation (data fit + coverage +
+    a per-primitive complexity cost + boundary smoothness). Faces no
+    primitive explains can be kept as a \texttt{Reverse\_Leftover} faceted
+    patch so the exported STEP still contains the complete part.
+  \item[Auto-Decompose Solid (Boolean)] Volumetric decomposition: samples the
+    interior volume and greedily covers it with inscribed spheres, cylinders
+    and boxes, producing an additive union of solids. Export with the OCCT
+    \ui{Merge into one solid} option.
+\end{description}
+
+Treat both as a convenience to correct, not a promise: review the resulting
+feature set, delete bad members, and re-fit where needed.
+
+%=====================================================================
+\section{The feature stack}
+\label{sec:stack}
+
+Every fit and every forward-built primitive lands in \ui{Fitted Features}.
+Each entry shows its boolean role (\texttt{+}/\texttt{--}), kind, a summary
+with dimensions, and its RMS (or ``exact'' for built primitives). Prefixes mark
+machine-generated sets: \texttt{[A]} surface auto-decompose, \texttt{[S]}
+solid decompose, \texttt{[B]} forward-built.
+
+From the stack you can, non-destructively:
+
+\begin{itemize}[nosep]
+  \item \textbf{Reorder} features (arrows). Order matters with
+    \emph{Booleans in stack order} at export: an Add placed after a cut
+    refills it (e.g.\ a boss inside a pocket).
+  \item \textbf{Re-fit} a feature from its remembered source faces after
+    editing the mesh.
+  \item \textbf{Toggle Add / Subtract}, and for subtractive features choose
+    \ui{Through} (cutter overshoots both ends so the hole opens cleanly) or
+    \ui{Blind} (keeps the pocket depth exact; the open end is auto-detected).
+  \item \textbf{Tag threads}: on a cylinder/cone, enter e.g.\ \texttt{M8x1.25}.
+    The designation is written into the STEP product name and the PMI sidecar.
+  \item \textbf{Hole presets}: on a subtractive cylinder choose
+    \ui{Counterbore} (recess radius + depth) or \ui{Countersink} (recess
+    radius + angle); the recess is cut as an extra coaxial cutter on the OCCT
+    path.
+  \item \textbf{Select} the feature's generated object in the viewport;
+    \textbf{delete} single features or \textbf{clear} whole sets.
+\end{itemize}
+
+The stack persists in the \texttt{.blend} file; the authoritative parameters
+of each feature live on its generated object, so features survive reloads and
+renames of the session list.
+
+%=====================================================================
+\section{Forward modeling: Build --- STEP Primitives}
+\label{sec:forward}
+
+The \ui{Build} panel adds solids that are STEP-exportable by construction:
+\textbf{Box, Cylinder, Cone (frustum), Sphere, Torus}. The exact analytic
+parameters are stored on the object; the viewport mesh is just a preview
+tessellation.
+
+\begin{itemize}[nosep]
+  \item Pick a primitive and a \ui{Role} (Add or Subtract --- a forward-built
+    cylinder makes a perfect drill), then \ui{Add Primitive}.
+  \item With the object active, its dimensions appear as live-editable fields;
+    editing one regenerates the mesh immediately.
+  \item If you move/rotate the object, that transform is carried into the
+    export. If you \emph{scale} it in Object Mode, the panel offers
+    \ui{Bake Scale into Parameters} --- click it so the stored dimensions match
+    what you see. Non-uniform scale on curved primitives is flagged: it is
+    not representable as an analytic STEP surface.
+  \item If the mesh drifts out of sync with the stored parameters (e.g.\ you
+    edited vertices by hand), the panel warns and offers
+    \ui{Rebuild from Parameters}.
+\end{itemize}
+
+%=====================================================================
+\section{Exporting STEP}
+\label{sec:export}
+
+Click \ui{Export STEP (AP242)} in the \ui{Fitted Features} panel. The file
+dialog carries the export options:
+
+\subsection{Backend and boolean options}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}p{4.2cm}p{9.6cm}@{}}
+\toprule
+\textbf{Option} & \textbf{Meaning} \\
+\midrule
+Backend & \ui{Auto} (OCCT if installed, else pure Python), or force either. \\
+Merge into one solid & Fuse all Add solids into a single body (OCCT). \\
+Booleans in stack order & Apply Add/Subtract in feature-stack order so a
+  later Add refills a cut. Off = fuse all Adds first, then cut (OCCT). \\
+Cutter overshoot & Extend cutters by this fraction at each end so through
+  holes open cleanly on coplanar faces (OCCT). \\
+Auto-stitch shared edges & Unify coincident faces so abutting features share
+  real edges (OCCT). \\
+Make watertight + Sew tolerance & Sew all faces, build a closed solid, heal
+  gaps up to the tolerance; reports remaining open edges (OCCT). \\
+Cutters (pure Python) & What to do with Subtract features when there is no
+  kernel: \ui{Include marked} (red \texttt{cutter:} reference solids ---
+  default), \ui{Skip}, or \ui{Include as solids} (holes appear filled). \\
+\bottomrule
+\end{tabular}
+\caption{Backend/boolean export options.}
+\end{table}
+
+\subsection{Units and scale}
+\label{sec:units}
+
+The \ui{Unit} option sets the length unit declared inside the STEP file
+(mm / m / inch); it defaults to your scene's display unit. \ui{Scale from
+Scene units} derives the coordinate scale from Blender's unit settings ---
+e.g.\ a metric scene at Unit Scale 0.001 with STEP unit mm gives
+\texttt{1 BU $\to$ 1 mm}. The dialog always shows the \emph{effective scale}
+live; check it before exporting. Choose \ui{Manual} to force a factor.
+Scenes with unit system \emph{None} pass coordinates through unchanged.
+
+\subsection{Scope and extras}
+
+\begin{itemize}[nosep]
+  \item \ui{Selected only} exports just the selected Reverse objects.
+  \item \ui{Feature set} filters by group: All / Manual / Built / Auto /
+    Solid --- useful when an auto-decompose set coexists with hand fits.
+  \item \ui{Include leftover patches} writes the unexplained-face patches so
+    the STEP contains the complete part (as faceted planar faces).
+  \item \ui{Write PMI sidecar} adds \texttt{.pmi.json} and \texttt{.pmi.csv}
+    next to the STEP with every feature's dimensions (radii, diameters,
+    lengths, angles, threads) and pairwise relationships (axis angles, hole
+    spacing) --- handy for inspection sheets.
+  \item \ui{Embed semantic PMI} embeds AP242 \texttt{DIMENSIONAL\_SIZE}
+    entities so CAD reads diameters/lengths as queryable PMI (pure-Python
+    writer only).
+\end{itemize}
+
+\subsection{The validation report}
+
+After an OCCT export, the \ui{Validation Report} sub-panel lists every solid
+with its volume and validity, plus a watertightness line (open-edge count if
+not). Read it every time: \emph{valid + watertight + plausible volume} is
+your evidence the file will survive a CAD import and a machine shop's quote.
+The pure-Python path cannot validate; it says so instead of pretending.
+
+\subsection{Limits of the pure-Python writer}
+\label{sec:purepython}
+
+The built-in writer emits real analytic solids (box, cylinder, cone, sphere,
+torus), bounded plane patches, trimmed partial-cylinder fillet patches, and
+faceted leftover patches --- with per-feature colours. It cannot: perform
+booleans (no holes), merge bodies, sew to watertight, or validate. Overlapping
+Add bodies are written as separate interpenetrating solids in one part.
+
+%=====================================================================
+\section{Verification and troubleshooting}
+
+\subsection{Verifying a STEP file}
+
+\begin{itemize}[nosep]
+  \item Open it in FreeCAD: it should appear as solid bodies, not a mesh.
+    \ui{Part} workbench $\to$ \ui{Check geometry} should report no errors for
+    watertight exports.
+  \item Measure a known dimension (a hole diameter, a plate thickness) ---
+    the point of this tool is that those numbers are exact.
+  \item Compare the reported volume in the \ui{Validation Report} against an
+    expectation ($\pi r^2 h$ for a cylinder, etc.).
+\end{itemize}
+
+\subsection{Common issues}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}p{5.6cm}p{8.2cm}@{}}
+\toprule
+\textbf{Symptom} & \textbf{Likely cause / fix} \\
+\midrule
+Part imports 1000$\times$ too big/small &
+  Unit mismatch. Check the \emph{effective scale} line in the export dialog
+  (Section~\ref{sec:units}). \\
+Holes are filled in the imported part &
+  Exported on the pure-Python path with \ui{Include as solids}, or OCCT not
+  installed. Install OCCT; keep \ui{Cutters} on \ui{Include marked}. \\
+Hole doesn't break through the surface &
+  Increase \ui{Cutter overshoot}, or set the feature's cut mode to
+  \ui{Through}. \\
+Watertight pass reports open edges &
+  Leftover/fillet patches only meet fitted surfaces within the fit deviation.
+  Raise \ui{Sew tolerance} slightly, or exclude leftovers. \\
+Fit has a high RMS &
+  The selection includes faces from another surface. Use the heatmap to spot
+  them, or enable \ui{Reject outliers}. \\
+Auto-detect picks the wrong primitive &
+  Select more of the surface (partial patches are ambiguous), or choose the
+  primitive explicitly --- the runner-up list shows how close the call was. \\
+Torus/fillet fit is approximate &
+  Known limitation on partial patches; select as much of the ring/round as
+  possible. Fillet arcs must be $<330^\circ$. \\
+STEP file is huge &
+  Leftover patches carry many triangles. Remesh, or disable \ui{Include
+  leftover patches}. \\
+\bottomrule
+\end{tabular}
+\caption{Troubleshooting quick reference.}
+\end{table}
+
+\begin{tipbox}
+Model with intent in Blender and the fits will be exact: keep flat things
+flat, use enough segments on curved surfaces, apply scale
+(\texttt{Ctrl+A}) before fitting, and prefer one feature per surface.
+\end{tipbox}
+
+%=====================================================================
+\section{Roadmap}
+
+Development continues along the plan in \texttt{PLAN.md} at the repository
+root: an OCCT-first experience, extruded-profile and revolve recovery
+(genuine sketch-based solids), fillets and chamfers applied as real blends,
+multi-body STEP with colours, and --- longer term --- links from the feature
+stack into Blender's simulation systems and an optional feature-based CNC
+toolpath module.
+
+\appendix
+\section{Running the test suite}
+
+From the repository root:
+
+\begin{lstlisting}
+# Pure-NumPy core (no Blender needed)
+python3 reverse_mesh/tests/test_fitting.py
+python3 reverse_mesh/tests/test_step.py
+python3 reverse_mesh/tests/test_decompose.py
+python3 reverse_mesh/tests/test_solidfit.py
+
+# OCCT kernel round-trip (needs cadquery-ocp)
+python3 reverse_mesh/tests/test_occ_export.py
+
+# Blender integration (headless)
+blender --background --python reverse_mesh/tests/blender_smoke.py
+\end{lstlisting}
+
+\section{License}
+
+BlenderMesh2STEP is free software under the GPL-3.0-or-later license.
+
+\end{document}

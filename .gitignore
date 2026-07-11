@@ -20,3 +20,12 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
+
+# LaTeX build artifacts (docs/)
+docs/*.aux
+docs/*.log
+docs/*.out
+docs/*.toc
+docs/*.fls
+docs/*.fdb_latexmk
+docs/*.synctex.gz
