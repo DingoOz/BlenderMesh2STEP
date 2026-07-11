@@ -45,6 +45,14 @@ def _features():
         {"kind": "FILLET", "name": "fl", "params": {     # 90° edge fillet patch
             "base": (60, 0, 0), "axis": (0, 0, 1), "ref": (1, 0, 0),
             "radius": 1.0, "height": 4.0, "u_min": 0.0, "u_max": math.pi / 2}},
+        {"kind": "EXTRUDE", "name": "ex", "params": {    # stadium/slot prism
+            "base": (70, 0, 0), "axis": (0, 0, 1), "xdir": (1, 0, 0), "height": 1.5,
+            "profile": [
+                [0, -2, -1, 2, -1, 0, 0, 0],
+                [1, 2, -1, 2, 1, 2, 0, 1],
+                [0, 2, 1, -2, 1, 0, 0, 0],
+                [1, -2, 1, -2, -1, -2, 0, 1],
+            ]}},
     ]
 
 
@@ -83,7 +91,8 @@ def main():
         check(f"emits {ent[:-1]}", ent in text)
 
     n_solids = text.count("MANIFOLD_SOLID_BREP(")
-    check("solid count", n_solids == 6, f"got {n_solids}")  # box+cyl+2cone+sph+torus; plane is a surface model
+    check("solid count", n_solids == 7,   # box+cyl+2cone+sph+torus+extrude
+          f"got {n_solids}")              # plane/fillet are surface models
 
     # All reals carry a decimal point (spot-check there are no bare integers in coords).
     bad = re.findall(r"CARTESIAN_POINT\('',\(([^)]*)\)", text)

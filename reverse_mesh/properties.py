@@ -25,6 +25,8 @@ PRIMITIVE_ITEMS = [
     ("SPHERE", "Sphere", "Spherical face", "MESH_UVSPHERE", 4),
     ("TORUS", "Torus", "Toroidal face / ring (best on full rings)", "MESH_TORUS", 5),
     ("FILLET", "Fillet", "Edge fillet / round → a trimmed partial cylinder", "MOD_BEVEL", 7),
+    ("EXTRUDE", "Extrude", "Extruded planar profile (prism) — select the whole "
+     "prism including its end caps", "MOD_SOLIDIFY", 8),
 ]
 
 
@@ -34,6 +36,7 @@ BUILD_PRIMITIVE_ITEMS = [
     ("CONE", "Cone", "A conical / tapered solid (frustum)", "MESH_CONE", 2),
     ("SPHERE", "Sphere", "A spherical solid", "MESH_UVSPHERE", 3),
     ("TORUS", "Torus", "A toroidal solid (ring)", "MESH_TORUS", 4),
+    ("EXTRUDE", "Extrude (N-gon)", "An extruded regular-polygon prism", "MOD_SOLIDIFY", 5),
 ]
 
 
@@ -64,6 +67,8 @@ def _on_build_param_update(self, context):
         h = new["height"]
         new["half_angle"] = (math.atan(abs(new["radius2"] - new["radius1"]) / h)
                              if h > 1e-12 else 0.0)
+    if kind == "EXTRUDE":
+        forward.refresh_extrude_profile(new)   # N-gon profile follows the radius
     # Reassign the whole dict: nested IDProperty writes don't reliably tag updates.
     obj["reverse"] = new
     segments = 48
@@ -232,6 +237,11 @@ class ReverseSettings(PropertyGroup):
         description="Which STEP solid to add (forward building block)",
         items=BUILD_PRIMITIVE_ITEMS,
         default="BOX",
+    )
+    build_extrude_sides: IntProperty(
+        name="Sides",
+        description="Profile side count for a forward-built extruded prism",
+        default=6, min=3, max=64,
     )
     create_object: BoolProperty(
         name="Create clean object",

@@ -37,6 +37,8 @@ def generate_mesh(kind, params, segments: int = 48):
         return _torus(params, segments)
     if kind == "FILLET":
         return _fillet(params, segments)
+    if kind == "EXTRUDE":
+        return _extrude(params, segments)
     raise ValueError(f"Unknown primitive kind: {kind}")
 
 
@@ -251,6 +253,35 @@ def _fillet(p, segments):
     return verts, faces, Matrix.Translation(loc) @ rot
 
 
+def _extrude(p, segments):
+    """Prism from a 2D line/arc profile: tessellated rings + two n-gon caps.
+
+    Local frame: profile in XY, extrusion along +Z from 0 to height. The world
+    matrix maps (xdir, axis×xdir, axis) onto (X, Y, Z) at ``base``.
+    """
+    from .fitting import profile as profile2d
+
+    h = float(p["height"])
+    ring = profile2d.tessellate(p["profile"], segments)
+    m = len(ring)
+    verts = [(float(u), float(v), 0.0) for u, v in ring]
+    verts += [(float(u), float(v), h) for u, v in ring]
+    faces = []
+    for i in range(m):
+        j = (i + 1) % m
+        faces.append((i, j, m + j, m + i))
+    faces.append(tuple(range(m)))                            # bottom cap (n-gon)
+    faces.append(tuple(range(2 * m - 1, m - 1, -1)))         # top cap (n-gon)
+
+    az = Vector(tuple(float(x) for x in p["axis"])).normalized()
+    e1 = Vector(tuple(float(x) for x in p["xdir"]))
+    e1 = (e1 - e1.dot(az) * az).normalized()
+    e2 = az.cross(e1)
+    loc = Vector(tuple(float(x) for x in p["base"]))
+    rot = Matrix((e1, e2, az)).transposed().to_4x4()
+    return verts, faces, Matrix.Translation(loc) @ rot
+
+
 def _serialise_params(kind, p, result):
     """Flatten fit params to plain floats/lists for object custom properties.
 
@@ -263,8 +294,12 @@ def _serialise_params(kind, p, result):
     for key, value in p.items():
         if key.startswith("_"):
             continue
-        if isinstance(value, np.ndarray):
+        if isinstance(value, np.ndarray) and value.ndim == 2:
+            out[key] = [[float(x) for x in row] for row in value]   # e.g. profile
+        elif isinstance(value, np.ndarray):
             out[key] = [float(x) for x in value]
+        elif isinstance(value, (list, tuple)) and value and hasattr(value[0], "__len__"):
+            out[key] = [[float(x) for x in row] for row in value]
         elif isinstance(value, (list, tuple)):
             out[key] = [float(x) for x in value]
         elif isinstance(value, str):

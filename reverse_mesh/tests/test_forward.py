@@ -31,6 +31,7 @@ DIMS = {
     "CONE": {"radius1": 3.0, "radius2": 1.0, "height": 4.0},
     "SPHERE": {"radius": 2.5},
     "TORUS": {"major_radius": 4.0, "minor_radius": 1.0},
+    "EXTRUDE": {"radius": 1.5, "height": 3.0, "sides": 8},
 }
 
 
@@ -124,6 +125,25 @@ def main():
     cyl.scale = (1.0, 1.0, 1.0)
     bpy.context.view_layer.update()
     print("[ok] uniform scale bakes, non-uniform scale flagged")
+
+    # --- extrude: profile follows a radius edit and a baked scale --------------
+    bpy.ops.reverse.add_primitive(kind="EXTRUDE", sides=6, radius=1.0, height=2.0)
+    import math as _m
+    prism = bpy.context.active_object
+    prism.reverse_build.radius = 2.0
+    r_prof = _m.hypot(prism["reverse"]["profile"][0][1],
+                      prism["reverse"]["profile"][0][2])
+    if abs(r_prof - 2.0) > 1e-9:
+        fail(f"extrude profile did not follow radius edit ({r_prof})")
+    prism.scale = (1.5, 1.5, 1.5)
+    bpy.context.view_layer.update()
+    if bpy.ops.reverse.bake_scale() != {"FINISHED"}:
+        fail("extrude bake_scale failed")
+    r_prof = _m.hypot(prism["reverse"]["profile"][0][1],
+                      prism["reverse"]["profile"][0][2])
+    if abs(r_prof - 3.0) > 1e-9 or abs(prism["reverse"]["height"] - 3.0) > 1e-9:
+        fail(f"extrude bake wrong (profile r {r_prof}, h {prism['reverse']['height']})")
+    print("[ok] extrude profile follows radius edit and baked scale")
 
     # --- export: ADD box + SUBTRACT cylinder, pure-Python writer ---------------
     bpy.ops.wm.read_factory_settings(use_empty=True)

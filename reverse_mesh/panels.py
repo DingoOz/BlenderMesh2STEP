@@ -32,6 +32,7 @@ class REVERSE_UL_features(UIList):
             "CONE": "MESH_CONE",
             "SPHERE": "MESH_UVSPHERE",
             "TORUS": "MESH_TORUS",
+            "EXTRUDE": "MOD_SOLIDIFY",
         }
         row = layout.row(align=True)
         op_icon = "REMOVE" if item.operation == "SUBTRACT" else "ADD"
@@ -71,6 +72,8 @@ class REVERSE_PT_build(Panel):
 
         col = layout.column(align=True)
         col.prop(settings, "build_primitive_type")
+        if settings.build_primitive_type == "EXTRUDE":
+            col.prop(settings, "build_extrude_sides")
         col.prop(settings, "default_operation", text="Role")
         if settings.default_operation == "SUBTRACT":
             col.prop(settings, "default_cut_mode", text="Cut")
@@ -79,7 +82,7 @@ class REVERSE_PT_build(Panel):
 
         icon_for = {"BOX": "MESH_CUBE", "CYLINDER": "MESH_CYLINDER",
                     "CONE": "MESH_CONE", "SPHERE": "MESH_UVSPHERE",
-                    "TORUS": "MESH_TORUS"}
+                    "TORUS": "MESH_TORUS", "EXTRUDE": "MOD_SOLIDIFY"}
         layout.operator("reverse.add_primitive", text="Add Primitive",
                         icon=icon_for.get(settings.build_primitive_type, "PLUS"))
 
@@ -89,6 +92,10 @@ class REVERSE_PT_build(Panel):
             return
         kind = data["kind"]
         fields = forward.PARAM_FIELDS.get(kind)
+        # A *fitted* extrusion has an arbitrary measured profile (no 'sides');
+        # its radius is not a parameter, so offer no dimension editor.
+        if kind == "EXTRUDE" and "sides" not in data.keys():
+            fields = None
 
         box = layout.box()
         box.label(text=f"{obj.name} · {kind.title()}", icon=icon_for.get(kind, "DOT"))
