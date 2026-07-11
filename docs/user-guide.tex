@@ -347,6 +347,10 @@ Backend & \ui{Auto} (OCCT if installed, else pure Python), or force either. \\
 Merge into one solid & Fuse all Add solids into a single body (OCCT). \\
 Booleans in stack order & Apply Add/Subtract in feature-stack order so a
   later Add refills a cut. Off = fuse all Adds first, then cut (OCCT). \\
+Fillets as real blends & Apply recognized edge fillets as true rounds on the
+  solid at the fitted radius — the body stays watertight and the blend is
+  editable in CAD. Fillets whose edge cannot be located fall back to trimmed
+  patches (OCCT). \\
 Cutter overshoot & Extend cutters by this fraction at each end so through
   holes open cleanly on coplanar faces (OCCT). \\
 Auto-stitch shared edges & Unify coincident faces so abutting features share

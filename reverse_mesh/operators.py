@@ -1492,6 +1492,16 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
         ),
         default=0.05, min=0.0, max=1.0, subtype="FACTOR",
     )
+    blend_fillets: BoolProperty(
+        name="Fillets as real blends",
+        description=(
+            "Apply recognized edge fillets as true rounds on the solid "
+            "(BRepFilletAPI) instead of loose trimmed patches — keeps the body "
+            "watertight and the blend editable in CAD. Fillets whose edge "
+            "cannot be found fall back to patches (OCCT only)"
+        ),
+        default=True,
+    )
     auto_stitch: BoolProperty(
         name="Auto-stitch shared edges",
         description=(
@@ -1646,6 +1656,7 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
         box.label(text="Booleans / healing (OCCT)")
         box.prop(self, "merge_solids")
         box.prop(self, "ordered_booleans")
+        box.prop(self, "blend_fillets")
         box.prop(self, "cutter_overshoot")
         box.prop(self, "auto_stitch")
         box.prop(self, "make_watertight")
@@ -1732,7 +1743,8 @@ class REVERSE_OT_export_step(Operator, ExportHelper):
                                          watertight=self.make_watertight,
                                          sew_tol=self.sew_tolerance,
                                          auto_stitch=self.auto_stitch,
-                                         ordered=self.ordered_booleans)
+                                         ordered=self.ordered_booleans,
+                                         blend_fillets=self.blend_fillets)
                 context.scene.reverse.last_report = "\n".join(
                     drift_warnings + [_format_report(info)])
                 self.report({"INFO"}, f"Exported via OCCT: {info}")

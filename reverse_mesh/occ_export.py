@@ -205,6 +205,105 @@ def _extrude_basis(p):
     return e1, _cross(axis, e1)
 
 
+def _fillet_edge_line(p):
+    """The sharp-edge line a recognized FILLET patch replaces, or None.
+
+    The fitted blend cylinder is tangent to the part's two faces at angles
+    ``u_min``/``u_max``; the un-filleted solid's sharp edge is the tangent
+    planes' intersection: parallel to the axis, at distance
+    ``r / cos(span/2)`` from it, in the arc's mid-angle direction. Returns
+    ``(point_on_line, axis_dir, half_height, radius)``.
+    """
+    span = float(p["u_max"]) - float(p["u_min"])
+    if not (0.0 < span < math.radians(170.0)):
+        return None                        # tangent planes (near-)parallel
+    axis = _unit(tuple(float(c) for c in p["axis"]))
+    e1 = tuple(float(c) for c in p["ref"])
+    e1 = _unit(_sub(e1, _scale(axis, _dot(e1, axis))))
+    e2 = _cross(axis, e1)
+    mid = (float(p["u_min"]) + float(p["u_max"])) / 2.0
+    r = float(p["radius"])
+    d = r / math.cos(span / 2.0)
+    corner = _add(tuple(float(c) for c in p["base"]),
+                  _add(_scale(e1, d * math.cos(mid)), _scale(e2, d * math.sin(mid))))
+    return corner, axis, float(p["height"]) / 2.0, r
+
+
+def _apply_fillet_blends(base, fillet_feats):
+    """Apply recognized FILLET features as real blends on ``base``.
+
+    For each feature, finds the solid's edges lying on the predicted sharp-edge
+    line and rounds them with ``BRepFilletAPI_MakeFillet`` at the fitted
+    radius. Returns ``(shape, n_applied, unmatched_features)`` — unmatched
+    features should fall back to being exported as trimmed patches.
+    """
+    (MakeFillet,) = _imp("BRepFilletAPI", "BRepFilletAPI_MakeFillet")
+    (TopExp_Explorer,) = _imp("TopExp", "TopExp_Explorer")
+    (TopAbs_EDGE, TopAbs_VERTEX) = _imp("TopAbs", "TopAbs_EDGE", "TopAbs_VERTEX")
+    (TopoDS,) = _imp("TopoDS", "TopoDS")
+    (BRep_Tool,) = _imp("BRep", "BRep_Tool")
+
+    def edge_endpoints(edge):
+        pts = []
+        v = TopExp_Explorer(edge, TopAbs_VERTEX)
+        while v.More():
+            pnt = BRep_Tool.Pnt_s(TopoDS.Vertex_s(v.Current()))
+            pts.append((pnt.X(), pnt.Y(), pnt.Z()))
+            v.Next()
+        return pts
+
+    def line_distance(pt, origin, direction):
+        rel = _sub(pt, origin)
+        along = _dot(rel, direction)
+        return _norm(_sub(rel, _scale(direction, along))), along
+
+    fil = MakeFillet(base)
+    matched_any = False
+    unmatched = []
+    n_edges_added = 0
+    for feat in fillet_feats:
+        line = _fillet_edge_line(feat["params"])
+        if line is None:
+            unmatched.append(feat)
+            continue
+        corner, axis, half_h, r = line
+        tol = max(0.3 * r, 1e-9)
+        found = False
+        e = TopExp_Explorer(base, TopAbs_EDGE)
+        while e.More():
+            edge = TopoDS.Edge_s(e.Current())
+            pts = edge_endpoints(edge)
+            if len(pts) == 2:
+                d0, a0 = line_distance(pts[0], corner, axis)
+                d1, a1 = line_distance(pts[1], corner, axis)
+                # Both endpoints on the predicted line, overlapping the
+                # fitted patch's axial extent (generous margin).
+                margin = half_h + max(half_h, r)
+                if (d0 <= tol and d1 <= tol
+                        and min(a0, a1) <= margin and max(a0, a1) >= -margin):
+                    try:
+                        fil.Add(r, edge)
+                        found = True
+                        n_edges_added += 1
+                    except Exception:
+                        pass
+            e.Next()
+        if found:
+            matched_any = True
+        else:
+            unmatched.append(feat)
+
+    if not matched_any or n_edges_added == 0:
+        return base, 0, unmatched
+    try:
+        fil.Build()
+        if not fil.IsDone():
+            raise RuntimeError("fillet build incomplete")
+        return fil.Shape(), len(fillet_feats) - len(unmatched), unmatched
+    except Exception:
+        return base, 0, fillet_feats
+
+
 def _unify(shape):
     """Merge coincident faces/edges of a fused shape into shared topology.
 
@@ -267,7 +366,8 @@ def _make_watertight(shape, tol):
 
 
 def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
-           watertight=False, sew_tol=0.01, auto_stitch=False, ordered=False):
+           watertight=False, sew_tol=0.01, auto_stitch=False, ordered=False,
+           blend_fillets=False):
     """Build OCCT solids from ``features`` and write an AP242 STEP file.
 
     Returns a short status string. If ``merge`` is set, all solids are fused into
@@ -336,13 +436,18 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
     # Separate the features by role; cutters are built later (they may need the
     # finished base solid to decide which end of a blind hole is open). ``seq``
     # keeps the arrival order of the solid features for ordered booleans.
-    adds, faces, cutters, seq = [], [], [], []
+    adds, faces, cutters, seq, fillet_feats = [], [], [], [], []
     for feat in features:
         kind = feat["kind"]
         op = feat.get("op", "ADD")
         if op == "SUBTRACT":
             cutters.append(feat)
             seq.append(("SUBTRACT", feat))
+            continue
+        if kind == "FILLET" and blend_fillets:
+            # Deferred: applied as a real blend on the finished base solid;
+            # falls back to a trimmed patch if no edge matches.
+            fillet_feats.append(feat)
             continue
         shape, is_solid = build(kind, feat["params"])
         if shape is None:
@@ -353,7 +458,7 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
         else:
             faces.append(shape)
 
-    if not adds and not cutters and not faces:
+    if not adds and not cutters and not faces and not fillet_feats:
         raise ValueError("No exportable shapes")
 
     def apply_cutter(base, feat):
@@ -374,10 +479,11 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
                 base = Cut(base, sub_shape).Shape()
         return base, True
 
-    do_bool = merge or auto_stitch or bool(cutters)
+    do_bool = merge or auto_stitch or bool(cutters) or bool(fillet_feats)
     parts = list(faces)
     note = ""
     skipped = []
+    unmatched_fillets = list(fillet_feats)
     if do_bool and adds:
         n_cut = 0
         if ordered:
@@ -397,6 +503,9 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
             for feat in cutters:
                 base, ok = apply_cutter(base, feat)
                 n_cut += 1 if ok else 0
+        n_blend = 0
+        if fillet_feats and base is not None:
+            base, n_blend, unmatched_fillets = _apply_fillet_blends(base, fillet_feats)
         if auto_stitch:
             try:
                 base = _unify(base)
@@ -406,7 +515,8 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
         else:
             note_stitch = ""
         parts.append(base)
-        note = f"1 body (+{len(adds)} / -{n_cut}){note_stitch}"
+        note_blend = f" — {n_blend} fillet blend(s)" if n_blend else ""
+        note = f"1 body (+{len(adds)} / -{n_cut}){note_blend}{note_stitch}"
         if skipped:
             note += (f" — {len(skipped)} cutter(s) before any base solid skipped: "
                      + ", ".join(skipped))
@@ -420,6 +530,15 @@ def export(features, filepath, *, unit="MM", merge=False, overshoot=0.05,
         if cutters and not adds:
             note = f"{len(cutters)} cutter(s) with no base to subtract from"
         note = note or f"{len(adds) + len(cutters)} solid(s)"
+
+    # Fillets that found no matching edge (or had no base solid) fall back to
+    # their trimmed-patch representation so no geometry is silently dropped.
+    for feat in unmatched_fillets:
+        shape, _is_solid = build("FILLET", feat["params"])
+        if shape is not None:
+            parts.append(shape)
+    if fillet_feats and unmatched_fillets:
+        note += f" — {len(unmatched_fillets)} fillet(s) unmatched (kept as patches)"
 
     # Combine into one compound to transfer in a single shape.
     builder = BRep_Builder()
