@@ -25,6 +25,7 @@ EXPECTED_KEYS = {
     "SPHERE": {"center", "radius"},
     "TORUS": {"center", "axis", "major_radius", "minor_radius"},
     "EXTRUDE": {"base", "axis", "xdir", "height", "radius", "sides", "profile"},
+    "REVOLVE": {"base", "axis", "height", "radius1", "radius2", "profile"},
 }
 
 DIMS = {
@@ -34,6 +35,7 @@ DIMS = {
     "SPHERE": {"radius": 2.5},
     "TORUS": {"major_radius": 4.0, "minor_radius": 1.0},
     "EXTRUDE": {"radius": 2.0, "height": 3.0, "sides": 8},
+    "REVOLVE": {"radius1": 1.0, "radius2": 2.0, "height": 0.5},
 }
 
 
@@ -87,6 +89,22 @@ def main():
     fitted = {"kind": "EXTRUDE", "height": 1.0, "profile": p["profile"]}
     if forward.refresh_extrude_profile(fitted):
         fail("refresh_extrude_profile must not touch a fitted (no-sides) profile")
+    # Revolve ring: rectangular section between the radii, refreshed on edit.
+    p = forward.make_params("REVOLVE", DIMS["REVOLVE"], loc)
+    if len(p["profile"]) != 4 or any(row[0] != 0.0 for row in p["profile"]):
+        fail(f"revolve ring profile should be 4 LINE rows, got {p['profile']}")
+    us = [row[1] for row in p["profile"]] + [row[3] for row in p["profile"]]
+    if abs(min(us) - 1.0) > 1e-12 or abs(max(us) - 2.0) > 1e-12:
+        fail(f"ring radii wrong: {min(us)}..{max(us)}")
+    p3 = dict(p, kind="REVOLVE", radius2=3.0)
+    if not forward.refresh_revolve_profile(p3):
+        fail("refresh_revolve_profile declined a ring")
+    us3 = [row[1] for row in p3["profile"]] + [row[3] for row in p3["profile"]]
+    if abs(max(us3) - 3.0) > 1e-12:
+        fail(f"refreshed ring outer radius {max(us3)} != 3.0")
+    fitted_rv = {"kind": "REVOLVE", "profile": p["profile"]}
+    if forward.refresh_revolve_profile(fitted_rv):
+        fail("refresh_revolve_profile must not touch a fitted profile")
     # Cylinder: base IS the body centre (build/_cylinder spans ±h/2 around it).
     p = forward.make_params("CYLINDER", DIMS["CYLINDER"], loc)
     if tuple(p["base"]) != loc:

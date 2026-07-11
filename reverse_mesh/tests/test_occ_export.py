@@ -526,6 +526,67 @@ def main():
     except OSError:
         pass
 
+    # Revolve (#14): a ball-end pin (cylinder + hemispherical dome) must be
+    # exact on both backends: V = πr²h + (2/3)πr³; a subtractive revolve ring
+    # cuts a groove.
+    pin = {"kind": "REVOLVE", "name": "pin", "params": {
+        "base": (0, 0, 0), "axis": (0, 0, 1),
+        "profile": [
+            [0, 0, 0, 1, 0, 0, 0, 0],
+            [0, 1, 0, 1, 2, 0, 0, 0],
+            [1, 1, 2, 0, 3, 0, 2, 1],
+            [0, 0, 3, 0, 0, 0, 0, 0],
+        ]}}
+    vol_pin = math.pi * 2.0 + (2.0 / 3.0) * math.pi
+    out_rv = os.path.join(os.path.dirname(__file__), "occ_revolve.step")
+    info_rv = occ_export.export([pin], out_rv, unit="MM")
+    if not info_rv.solids or abs(info_rv.solids[0]["volume"] - vol_pin) > 1e-6 \
+            or not info_rv.solids[0]["valid"]:
+        fail(f"OCCT revolve wrong: {info_rv.solids} expected {vol_pin}")
+    print(f"[ok] OCCT revolve: pin volume exact ({info_rv.solids[0]['volume']:.6f})")
+
+    out_rvp = os.path.join(os.path.dirname(__file__), "py_revolve.step")
+    washer = {"kind": "REVOLVE", "name": "w", "params": {
+        "base": (10, 0, 0), "axis": (0, 0, 1),
+        "profile": [
+            [0, 1, 0, 2, 0, 0, 0, 0],
+            [0, 2, 0, 2, 1, 0, 0, 0],
+            [0, 2, 1, 1, 1, 0, 0, 0],
+            [0, 1, 1, 1, 0, 0, 0, 0],
+        ]}}
+    with open(out_rvp, "w") as f:
+        f.write(step_export.build_step([pin, washer], unit="MM", product_name="Rv"))
+    rrv = STEPControl_Reader()
+    if rrv.ReadFile(out_rvp) != IFSelect_RetDone:
+        fail("pure-Python revolve did not re-read")
+    rrv.TransferRoots(); shrv = rrv.OneShape()
+    if shrv.IsNull() or not BRepCheck_Analyzer(shrv).IsValid():
+        fail("pure-Python revolve re-read invalid")
+    vrv = GProp_GProps(); BRepGProp.VolumeProperties_s(shrv, vrv)
+    vol_both_rv = vol_pin + math.pi * 3.0
+    if abs(vrv.Mass() - vol_both_rv) > 1e-6:
+        fail(f"pure-Python revolve volume {vrv.Mass():.6f} != {vol_both_rv:.6f}")
+    print(f"[ok] pure-Python revolve: pin + washer re-read valid, volume exact")
+
+    groove = {"kind": "REVOLVE", "name": "gr", "op": "SUBTRACT", "params": {
+        "base": (0, 0, 0), "axis": (0, 0, 1),
+        "profile": [
+            [0, 0.8, 0.8, 1.4, 0.8, 0, 0, 0],
+            [0, 1.4, 0.8, 1.4, 1.2, 0, 0, 0],
+            [0, 1.4, 1.2, 0.8, 1.2, 0, 0, 0],
+            [0, 0.8, 1.2, 0.8, 0.8, 0, 0, 0],
+        ]}}
+    info_gr = occ_export.export([pin, groove], out_rv, unit="MM", merge=True)
+    vol_gr = vol_pin - math.pi * (1.0 - 0.8 ** 2) * 0.4
+    if not info_gr.solids or abs(info_gr.solids[0]["volume"] - vol_gr) > 1e-6:
+        fail(f"revolve groove cut wrong: {info_gr.solids} expected {vol_gr}")
+    print(f"[ok] revolve as cutter: groove volume exact ({info_gr.solids[0]['volume']:.6f})")
+    for f in (out_rv, out_rvp):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+
     for f in (out, out2):
         try:
             os.remove(f)

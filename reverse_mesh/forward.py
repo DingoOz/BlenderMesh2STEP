@@ -25,7 +25,7 @@ except ImportError:                      # standalone (pure-Python tests)
     from fitting.common import FitResult
     from fitting.primitives import summarize
 
-BUILD_KINDS = ("BOX", "CYLINDER", "CONE", "SPHERE", "TORUS", "EXTRUDE")
+BUILD_KINDS = ("BOX", "CYLINDER", "CONE", "SPHERE", "TORUS", "EXTRUDE", "REVOLVE")
 
 # Editable dimension fields per kind: (param key, UI label). Keys match the
 # fitters' schemas / _PARAM_KINDS in operators.py and the reverse_build
@@ -41,6 +41,10 @@ PARAM_FIELDS = {
     # fixed at creation; circumradius and height stay live-editable, and each
     # edit regenerates the stored profile (see refresh_extrude_profile).
     "EXTRUDE": (("radius", "Radius"), ("height", "Height")),
+    # Forward-built revolves are rings/washers: a rectangular section between
+    # inner and outer radius, revolved about +Z.
+    "REVOLVE": (("radius1", "Inner radius"), ("radius2", "Outer radius"),
+                ("height", "Height")),
 }
 
 
@@ -84,7 +88,36 @@ def make_params(kind: str, dims: dict, location) -> dict:
         return {"base": base, "axis": z, "xdir": [1.0, 0.0, 0.0], "height": h,
                 "radius": d["radius"], "sides": float(sides),
                 "profile": [[float(x) for x in row] for row in prof]}
+    if kind == "REVOLVE":
+        h = d["height"]
+        base = [loc[0], loc[1], loc[2] - h / 2.0]
+        params = {"base": base, "axis": z, "height": h,
+                  "radius1": d["radius1"], "radius2": d["radius2"]}
+        refresh_revolve_profile(params)
+        return params
     raise ValueError(f"Not a forward-build kind: {kind}")
+
+
+def refresh_revolve_profile(params: dict) -> bool:
+    """Regenerate a ring/washer REVOLVE's rectangular profile in place.
+
+    Only applies to forward-built rings (they carry ``radius1``/``radius2``);
+    fitted revolves keep their measured profile. Returns True when refreshed.
+    """
+    if params.get("kind", "REVOLVE") != "REVOLVE":
+        return False
+    keys = params.keys()
+    if "radius1" not in keys or "radius2" not in keys:
+        return False
+    r1, r2, h = (float(params["radius1"]), float(params["radius2"]),
+                 float(params["height"]))
+    params["profile"] = [
+        [0.0, r1, 0.0, r2, 0.0, 0.0, 0.0, 0.0],
+        [0.0, r2, 0.0, r2, h, 0.0, 0.0, 0.0],
+        [0.0, r2, h, r1, h, 0.0, 0.0, 0.0],
+        [0.0, r1, h, r1, 0.0, 0.0, 0.0, 0.0],
+    ]
+    return True
 
 
 def refresh_extrude_profile(params: dict) -> bool:
@@ -140,9 +173,9 @@ def rebuild_object(obj, segments: int = 48):
     # by rebuilding them around the current placement.
     params = {k: (list(v) if hasattr(v, "__len__") and not isinstance(v, str) else v)
               for k, v in data.items()}
-    # An N-gon prism's profile is derived from radius/sides — regenerate it so
+    # Preset profiles are derived from their dimensions — regenerate them so
     # a radius edit (or baked scale) is reflected in the rebuilt mesh.
-    refreshed = refresh_extrude_profile(params)
+    refreshed = refresh_extrude_profile(params) or refresh_revolve_profile(params)
     verts, faces, matrix = build.generate_mesh(kind, params, segments)
 
     mesh = obj.data

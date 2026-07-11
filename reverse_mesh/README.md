@@ -132,6 +132,7 @@ kernel-grade writer), the exporter can use OpenCASCADE if it's installed. It is
 | Cone      | Apex from the linear condition `(p − apex)·n = 0`; axis from the plane the normals trace; half-angle from radial-vs-axial slope |
 | Torus     | Axis seeded by PCA + local angular refinement; centre from the region centroid; major/minor radii by linear least squares per candidate axis |
 | Extrude   | Axis from the face-normal ∥/⊥ criterion (candidates tried in score order); profile from side faces ruled along the axis, chained into a closed loop and segmented into lines + arcs by seed-and-grow circle fitting |
+| Revolve   | Axis from a linear Plücker solve (every surface normal of a revolved surface intersects the axis); profile from faces projected to the (radius, z) half-plane, closed along the axis when the solid touches it. Explicit-only — never chosen by Auto |
 
 Using **face normals** (available in Edit Mode) lets us solve the axis directly,
 avoiding the brute-force orientation search the original Fusion add-in needs.

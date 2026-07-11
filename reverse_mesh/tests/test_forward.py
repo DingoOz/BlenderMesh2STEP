@@ -32,6 +32,7 @@ DIMS = {
     "SPHERE": {"radius": 2.5},
     "TORUS": {"major_radius": 4.0, "minor_radius": 1.0},
     "EXTRUDE": {"radius": 1.5, "height": 3.0, "sides": 8},
+    "REVOLVE": {"radius1": 1.0, "radius2": 2.0, "height": 0.5},
 }
 
 

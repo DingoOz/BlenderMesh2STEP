@@ -1185,6 +1185,9 @@ class REVERSE_OT_add_primitive(Operator):
         if self.kind == "CONE" and dims["radius1"] <= 0.0 and dims["radius2"] <= 0.0:
             self.report({"WARNING"}, "Cone needs at least one non-zero radius")
             return {"CANCELLED"}
+        if self.kind == "REVOLVE" and dims["radius2"] <= dims["radius1"]:
+            self.report({"WARNING"}, "Ring needs outer radius > inner radius")
+            return {"CANCELLED"}
         params = forward.make_params(self.kind, dims, context.scene.cursor.location)
         result = forward.make_result(self.kind, params)
         obj = build.build_object(context, result, segments=settings.segments,
@@ -1283,7 +1286,7 @@ class REVERSE_OT_bake_scale(Operator):
         for key in _PARAM_KINDS[kind]["lengths"]:
             if key in new:
                 new[key] = float(new[key]) * factor
-        if kind == "EXTRUDE" and "profile" in new:
+        if kind in ("EXTRUDE", "REVOLVE") and "profile" in new:
             new["profile"] = [
                 [float(r[0])] + [float(x) * factor for x in list(r)[1:7]] + [float(r[7])]
                 for r in new["profile"]
@@ -1325,10 +1328,12 @@ _PARAM_KINDS = {
               "lengths": ["major_radius", "minor_radius"]},
     "FILLET": {"points": ["base"], "dirs": ["axis", "ref"],
                "lengths": ["radius", "height"]},
-    # EXTRUDE's 2D profile coordinates are lengths in the (xdir, axis×xdir)
+    # EXTRUDE's/REVOLVE's 2D profile coordinates are lengths in their profile
     # frame — scaled with the object, handled specially in _feature_from_object.
     "EXTRUDE": {"points": ["base"], "dirs": ["axis", "xdir"],
                 "lengths": ["height", "radius"]},
+    "REVOLVE": {"points": ["base"], "dirs": ["axis"],
+                "lengths": ["height", "radius1", "radius2"]},
 }
 
 
@@ -1407,7 +1412,7 @@ def _feature_from_object(obj, user_scale):
     for key in ("u_min", "u_max"):          # fillet arc angles — invariant under the frame
         if key in data.keys():
             params[key] = float(data[key])
-    if kind == "EXTRUDE" and "profile" in data.keys():
+    if kind in ("EXTRUDE", "REVOLVE") and "profile" in data.keys():
         k = obj_scale * s
         params["profile"] = [
             [float(row[0]), float(row[1]) * k, float(row[2]) * k,

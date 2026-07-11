@@ -182,6 +182,52 @@ def _stadium(length=4.0, radius=1.0, arc_segs=16):
     return pts
 
 
+
+def _lathe_region(profile_pts, closed, n_seg=32, rot=None, offset=(0, 0, 0)):
+    """Region for a lathe of the (radius, z) polyline about local Z."""
+    rot = np.eye(3) if rot is None else np.asarray(rot, dtype=float)
+    offset = np.asarray(offset, dtype=float)
+    prof = [np.asarray(q, dtype=float) for q in profile_pts]
+    m = len(prof)
+    ring_idx, points = [], []
+    for (rho, wz) in prof:
+        if rho < 1e-12:
+            ring_idx.append([len(points)])
+            points.append(rot @ np.array([0.0, 0.0, wz]) + offset)
+        else:
+            idxs = []
+            for k in range(n_seg):
+                a = 2 * np.pi * k / n_seg
+                idxs.append(len(points))
+                points.append(rot @ np.array([rho * np.cos(a), rho * np.sin(a), wz]) + offset)
+            ring_idx.append(idxs)
+    points = np.array(points)
+    fp, fn, fv = [], [], []
+    for i in range(m if closed else m - 1):
+        j = (i + 1) % m
+        (r0, w0), (r1, w1) = prof[i], prof[j]
+        if r0 < 1e-12 and r1 < 1e-12:
+            continue
+        d = np.array([w1 - w0, -(r1 - r0)])
+        d = d / np.linalg.norm(d)
+        for k in range(n_seg):
+            k2 = (k + 1) % n_seg
+            a_mid = 2 * np.pi * (k + 0.5) / n_seg
+            if r0 < 1e-12:
+                quad = [ring_idx[i][0], ring_idx[j][k], ring_idx[j][k2]]
+            elif r1 < 1e-12:
+                quad = [ring_idx[i][k], ring_idx[i][k2], ring_idx[j][0]]
+            else:
+                quad = [ring_idx[i][k], ring_idx[i][k2], ring_idx[j][k2], ring_idx[j][k]]
+            ctr = points[quad].mean(axis=0)
+            radial = np.array([np.cos(a_mid), np.sin(a_mid), 0.0])
+            fp.append(ctr)
+            fn.append(rot @ (d[0] * radial + np.array([0.0, 0.0, d[1]])))
+            fv.append(tuple(quad))
+    return Region(points=points, face_points=np.array(fp),
+                  face_normals=np.array(fn), face_verts=fv)
+
+
 def main():
     results = []
 
@@ -399,6 +445,34 @@ def main():
     pts, nrm = _sample_cylinder()
     results.append(_check("extrude needs topology",
                           fit_extrude(_region(pts, nrm)) is None))
+
+
+    # Revolve fits (explicit only — never chosen by AUTO).
+    from fitting import fit_revolve
+    washer = [(1, 0), (2, 0), (2, 1), (1, 1)]
+    rv = fit_revolve(_lathe_region(washer, True))
+    results.append(_check("revolve washer", rv is not None and rv.rms < 1e-9
+                          and len(rv.params["profile"]) == 4,
+                          rv.summary if rv else "None"))
+    rot = _rot([1, 0, 1], 0.9)
+    rv2 = fit_revolve(_lathe_region(washer, True, rot=rot, offset=(3, -2, 5)))
+    results.append(_check("revolve rotated washer", rv2 is not None and rv2.rms < 1e-9
+                          and abs(abs(np.dot(rv2.params["axis"], rot @ [0, 0, 1])) - 1) < 1e-9,
+                          rv2.summary if rv2 else "None"))
+    # Solid touching the axis: profile closes along the axis itself.
+    rv3 = fit_revolve(_lathe_region([(0, 0), (1.5, 0), (1.5, 2), (0, 2)], False))
+    results.append(_check("revolve axis-touching cylinder", rv3 is not None
+                          and rv3.rms < 1e-9 and len(rv3.params["profile"]) == 4,
+                          rv3.summary if rv3 else "None"))
+    # A full-circle profile is a torus, not a revolve.
+    th24 = np.linspace(0, 2 * np.pi, 24, endpoint=False)
+    tor = [(2 + 0.5 * np.cos(t), 0.5 * np.sin(t)) for t in th24]
+    results.append(_check("revolve declines torus",
+                          fit_revolve(_lathe_region(tor, True)) is None))
+    # AUTO never returns REVOLVE.
+    auto_kind = fit_auto(_lathe_region(washer, True)).kind
+    results.append(_check("AUTO excludes revolve", auto_kind != "REVOLVE",
+                          f"got {auto_kind}"))
 
     print(f"\n{sum(results)}/{len(results)} passed")
     sys.exit(0 if all(results) else 1)
