@@ -59,6 +59,9 @@ Blender-authored meshes. The result is a true B-rep solid, not an approximation.
 - **Edit non-destructively.** Every fit lands in a **feature stack** you can
   reorder, re-fit, delete, and reload across sessions — toggle Add/Subtract, snap
   dimensions to nice numbers, or tag a hole with a thread (e.g. `M8x1.25`).
+- **Named, coloured bodies.** OCCT exports go through the XCAF document layer:
+  each body is its own named product and per-feature colours survive into
+  FreeCAD/Fusion.
 - **Measure and verify.** Every fit reports its RMS error; the export gives a
   **per-solid validation report** (volume, validity, open edges), and you can write
   a **PMI dimension sidecar** (CSV/JSON) or embed **semantic AP242 dimensions**.
