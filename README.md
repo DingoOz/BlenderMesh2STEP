@@ -59,6 +59,8 @@ Blender-authored meshes. The result is a true B-rep solid, not an approximation.
 - **Edit non-destructively.** Every fit lands in a **feature stack** you can
   reorder, re-fit, delete, and reload across sessions — toggle Add/Subtract, snap
   dimensions to nice numbers, or tag a hole with a thread (e.g. `M8x1.25`).
+- **Inspect any part.** Select a mesh → *Part Inspector* reports its bounding-box
+  size, volume, centre of mass, surface area, and whether it's watertight.
 - **Named, coloured bodies.** OCCT exports go through the XCAF document layer:
   each body is its own named product and per-feature colours survive into
   FreeCAD/Fusion.

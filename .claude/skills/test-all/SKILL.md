@@ -18,6 +18,7 @@ python3 reverse_mesh/tests/test_fitting.py
 python3 reverse_mesh/tests/test_step.py
 python3 reverse_mesh/tests/test_decompose.py
 python3 reverse_mesh/tests/test_solidfit.py
+python3 reverse_mesh/tests/test_partstats.py
 python3 reverse_mesh/tests/test_forward_params.py
 python3 -m compileall -q reverse_mesh
 ```
