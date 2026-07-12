@@ -29,3 +29,7 @@ docs/*.toc
 docs/*.fls
 docs/*.fdb_latexmk
 docs/*.synctex.gz
+
+# Example STEP deliverables are tracked (test-output .step elsewhere is not)
+!examples/*.step
+!examples/*.stp
