@@ -318,6 +318,38 @@ class REVERSE_PT_features(Panel):
                          text="Install OCCT (recommended)")
 
 
+class REVERSE_PT_inspect(Panel):
+    bl_label = "Part Inspector"
+    bl_idname = "REVERSE_PT_inspect"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Reverse"
+    bl_parent_id = "REVERSE_PT_main"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        layout = self.layout
+        obj = context.active_object
+        row = layout.row()
+        row.enabled = obj is not None and obj.type == "MESH" and obj.mode == "OBJECT"
+        row.operator("reverse.part_stats", icon="INFO", text="Part Stats (active mesh)")
+
+        stats = context.scene.reverse.last_stats
+        if not stats:
+            layout.label(text="Select a mesh and click Part Stats", icon="MESH_DATA")
+            return
+        box = layout.box()
+        for i, line in enumerate(stats.split("\n")):
+            if i == 0:
+                box.label(text=line, icon="OBJECT_DATA")
+            elif "Watertight: YES" in line:
+                box.label(text=line, icon="CHECKMARK")
+            elif "Watertight: NO" in line:
+                r = box.row(); r.alert = True; r.label(text=line, icon="ERROR")
+            else:
+                box.label(text=line, icon="DOT")
+
+
 class REVERSE_PT_report(Panel):
     bl_label = "Validation Report"
     bl_idname = "REVERSE_PT_report"
@@ -341,7 +373,7 @@ class REVERSE_PT_report(Panel):
 
 
 classes = (REVERSE_UL_features, REVERSE_PT_build, REVERSE_PT_main,
-           REVERSE_PT_features, REVERSE_PT_report)
+           REVERSE_PT_features, REVERSE_PT_inspect, REVERSE_PT_report)
 
 
 def register():

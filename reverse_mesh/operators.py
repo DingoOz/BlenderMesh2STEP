@@ -17,7 +17,7 @@ from bpy.types import Operator
 from bpy_extras.io_utils import ExportHelper
 from mathutils import Matrix, Vector
 
-from . import build, forward, occ_export, overlay, pmi_export, step_export, units
+from . import build, forward, occ_export, overlay, partstats, pmi_export, step_export, units
 from . import properties as props_mod
 from .fitting import (
     FITTERS, MeshGraph, Region, classify_arrangement, fit_auto, fit_fillet,
@@ -1845,6 +1845,91 @@ class REVERSE_OT_install_occt(Operator):
         return {"FINISHED"}
 
 
+class REVERSE_OT_part_stats(Operator):
+    """Report CAD stats for the active mesh: size, volume, area, watertightness
+
+    Works on any mesh object (with or without fitted Reverse data). Volume and
+    centre of mass are exact for a closed mesh; when the mesh has open edges it
+    says so and flags the volume as unreliable. Lengths are in the scene's unit.
+    """
+
+    bl_idname = "reverse.part_stats"
+    bl_label = "Part Stats"
+    bl_options = {"REGISTER"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and obj.type == "MESH" and obj.mode == "OBJECT"
+
+    def execute(self, context):
+        obj = context.active_object
+        us = context.scene.unit_settings
+        if us.system == "NONE":
+            unit, factor = "BU", 1.0
+        else:
+            step_unit = units.step_unit_for_scene(us.system, us.length_unit)
+            unit = step_unit.lower()
+            factor = units.effective_scale(step_unit, system=us.system,
+                                           scale_length=us.scale_length)
+
+        depsgraph = context.evaluated_depsgraph_get()
+        obj_eval = obj.evaluated_get(depsgraph)
+        me = obj_eval.to_mesh()
+        try:
+            mw = obj.matrix_world
+            me.calc_loop_triangles()
+            verts = np.array([tuple(mw @ v.co) for v in me.vertices], dtype=float)
+            tris = np.array([tuple(lt.vertices) for lt in me.loop_triangles], dtype=int)
+            n_verts, n_faces = len(me.vertices), len(me.polygons)
+            bm = bmesh.new()
+            bm.from_mesh(me)
+            open_edges = sum(1 for e in bm.edges if len(e.link_faces) != 2)
+            bm.free()
+        finally:
+            obj_eval.to_mesh_clear()
+
+        if len(verts) == 0 or len(tris) == 0:
+            self.report({"WARNING"}, f"{obj.name} has no faces to measure")
+            return {"CANCELLED"}
+
+        st = partstats.part_stats(verts * factor, tris)
+        sx, sy, sz = st["size"]
+        vol = abs(st["signed_volume"])
+        area = st["area"]
+
+        lines = [obj.name]
+        data = obj.get("reverse")
+        if data is not None and "kind" in data.keys():
+            role = data.get("op", "ADD")
+            try:
+                summary = summarize(data["kind"], {k: data[k] for k in data.keys()})
+            except (KeyError, TypeError, ValueError):
+                summary = data["kind"]
+            lines.append(f"Feature: {summary}  ·  role {role.title()}")
+        lines.append(f"Size (bbox): {sx:.4g} × {sy:.4g} × {sz:.4g} {unit}")
+        if open_edges == 0:
+            lines.append("Watertight: YES (closed manifold)")
+            lines.append(f"Volume: {vol:.5g} {unit}³")
+            if st["signed_volume"] < 0:
+                lines.append("  note: face normals point inward (flipped)")
+            com = st["com"]
+            if com is not None:
+                lines.append(f"Centre of mass: ({com[0]:.3g}, {com[1]:.3g}, "
+                             f"{com[2]:.3g}) {unit}")
+        else:
+            lines.append(f"Watertight: NO — {open_edges} open/non-manifold edge(s)")
+            lines.append(f"Volume: ~{vol:.5g} {unit}³ (unreliable — not closed)")
+        lines.append(f"Surface area: {area:.5g} {unit}²")
+        lines.append(f"Mesh: {n_verts} verts · {n_faces} faces · {len(tris)} tris")
+
+        context.scene.reverse.last_stats = "\n".join(lines)
+        wt = "watertight" if open_edges == 0 else f"{open_edges} open edges"
+        self.report({"INFO"}, f"{obj.name}: {sx:.3g}×{sy:.3g}×{sz:.3g} {unit}, "
+                              f"vol {vol:.4g} {unit}³, {wt}")
+        return {"FINISHED"}
+
+
 def menu_export(self, context):
     self.layout.operator(REVERSE_OT_export_step.bl_idname, text="Reverse STEP (AP242) (.step)")
 
@@ -1909,6 +1994,7 @@ classes = (
     REVERSE_OT_set_cut_mode,
     REVERSE_OT_select_feature_object,
     REVERSE_OT_export_step,
+    REVERSE_OT_part_stats,
     REVERSE_OT_install_occt,
 )
 

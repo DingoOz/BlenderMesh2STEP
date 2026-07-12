@@ -437,6 +437,16 @@ Add bodies are written as separate interpenetrating solids in one part.
 %=====================================================================
 \section{Verification and troubleshooting}
 
+\subsection{Inspecting a part in Blender}
+
+Before (or instead of) exporting, select any mesh and open \ui{Part
+Inspector} $\to$ \ui{Part Stats}. It reports the bounding-box size, the
+enclosed volume and centre of mass, the surface area, and whether the mesh is
+\emph{watertight} (a closed manifold) or has open edges --- all in the scene's
+unit. It works on any mesh, not just fitted Reverse objects, and flags the
+volume as unreliable when the mesh is not closed. Use it to sanity-check a part
+before committing to an export.
+
 \subsection{Verifying a STEP file}
 
 \begin{itemize}[nosep]

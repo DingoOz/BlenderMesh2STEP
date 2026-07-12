@@ -463,6 +463,10 @@ class ReverseSettings(PropertyGroup):
     # path; shown in the Validation panel. Empty until the first export.
     last_report: StringProperty(name="Last export report", default="")
 
+    # Last Part Stats result (size / volume / watertightness); shown in the
+    # Part Inspector panel. Empty until the first inspection.
+    last_stats: StringProperty(name="Last part stats", default="")
+
 
 classes = (ReverseFeature, ReverseSettings, ReverseBuildParams)
 

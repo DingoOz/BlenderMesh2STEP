@@ -265,6 +265,40 @@ def main():
         fail(f"ring profile did not follow radius edit: {r_out} != 1.8")
     print("[ok] forward revolve: ring built, profile follows radius edit")
 
+    # Part Inspector (#16): stats on a closed vs an open mesh.
+    bpy.ops.object.mode_set(mode="OBJECT")
+    bpy.ops.mesh.primitive_cube_add(size=2.0, location=(0.0, -50.0, 0.0))
+    cube = bpy.context.active_object
+    if bpy.ops.reverse.part_stats() != {"FINISHED"}:
+        fail("part_stats on a cube failed")
+    stats = bpy.context.scene.reverse.last_stats
+    if "Watertight: YES" not in stats:
+        fail(f"closed cube not reported watertight:\n{stats}")
+    # A 2×2×2 cube: bbox 2×2×2, volume 8 (scene is metric mm here → 'mm').
+    if "8" not in stats or "Volume" not in stats:
+        fail(f"cube volume missing from stats:\n{stats}")
+    print("[ok] Part Inspector: closed cube → watertight + volume reported")
+    # An open box (5 of 6 faces) must report NOT watertight.
+    v = [(-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1),
+         (-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1)]
+    f = [(0, 3, 2, 1), (0, 1, 5, 4), (2, 3, 7, 6),
+         (1, 2, 6, 5), (0, 4, 7, 3)]                 # top (+Z) face omitted
+    om = bpy.data.meshes.new("OpenBox")
+    om.from_pydata(v, [], f)
+    om.update()
+    open_obj = bpy.data.objects.new("OpenBox", om)
+    open_obj.location = (0.0, -55.0, 0.0)
+    bpy.context.collection.objects.link(open_obj)
+    for o in bpy.context.selected_objects:
+        o.select_set(False)
+    open_obj.select_set(True)
+    bpy.context.view_layer.objects.active = open_obj
+    bpy.ops.reverse.part_stats()
+    if "Watertight: NO" not in bpy.context.scene.reverse.last_stats:
+        fail(f"open mesh not flagged as non-watertight:\n"
+             f"{bpy.context.scene.reverse.last_stats}")
+    print("[ok] Part Inspector: open mesh flagged NOT watertight")
+
     # Whole cube, no segmentation: AUTO must now pick a BOX (not torus/sphere).
     n0 = len(bpy.context.scene.reverse.features)
     bpy.ops.mesh.primitive_cube_add(size=2.0)

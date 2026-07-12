@@ -42,6 +42,10 @@ jobs:
         working-directory: reverse_mesh
         run: python tests/test_solidfit.py
 
+      - name: Part-stats tests
+        working-directory: reverse_mesh
+        run: python tests/test_partstats.py
+
       - name: Byte-compile all modules
         run: python -m compileall reverse_mesh
 
